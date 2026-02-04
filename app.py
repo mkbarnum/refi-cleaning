@@ -858,19 +858,48 @@ def render_step5_phones():
         result = st.session_state.step4_result
         
         st.divider()
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Before", result.before_count)
-        col2.metric("Removed", result.before_count - result.after_count)
-        col3.metric("After", result.after_count)
         
-        st.subheader("Removal Summary")
-        for reason, count in result.removal_summary.items():
+        # Calculate total removed across all steps
+        original_count = st.session_state.step1_result.before_count if st.session_state.step1_result else result.before_count
+        total_removed = original_count - result.after_count
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Original", original_count)
+        col2.metric("Total Removed", total_removed)
+        col3.metric("Final", result.after_count)
+        
+        st.subheader("Removal Summary (All Steps)")
+        
+        # Aggregate removal summaries from all steps
+        all_removal_summary = {}
+        if st.session_state.step1_result:
+            all_removal_summary.update(st.session_state.step1_result.removal_summary)
+        if st.session_state.step2_result:
+            all_removal_summary.update(st.session_state.step2_result.removal_summary)
+        if st.session_state.step3_result:
+            all_removal_summary.update(st.session_state.step3_result.removal_summary)
+        all_removal_summary.update(result.removal_summary)
+        
+        for reason, count in all_removal_summary.items():
             st.write(f"- {reason}: {count} rows")
         
         st.subheader("Final Cleaned Data Preview")
         st.dataframe(result.cleaned_df.head(25))
         
-        render_download_section(result.cleaned_df, result.all_removed_df, "final", st.session_state.column_mapping)
+        # Aggregate all removed rows from Steps 2-5
+        all_steps_removed = []
+        if st.session_state.step1_result and len(st.session_state.step1_result.all_removed_df) > 0:
+            all_steps_removed.append(st.session_state.step1_result.all_removed_df)
+        if st.session_state.step2_result and len(st.session_state.step2_result.all_removed_df) > 0:
+            all_steps_removed.append(st.session_state.step2_result.all_removed_df)
+        if st.session_state.step3_result and len(st.session_state.step3_result.all_removed_df) > 0:
+            all_steps_removed.append(st.session_state.step3_result.all_removed_df)
+        if result.all_removed_df is not None and len(result.all_removed_df) > 0:
+            all_steps_removed.append(result.all_removed_df)
+        
+        combined_removed_df = pd.concat(all_steps_removed, ignore_index=True) if all_steps_removed else pd.DataFrame()
+        
+        render_download_section(result.cleaned_df, combined_removed_df, "final", st.session_state.column_mapping)
         
         st.success("🎉 Data cleansing complete! Download your final results above.")
         
