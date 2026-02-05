@@ -1,7 +1,8 @@
 """File I/O module for reading and exporting data files."""
 
 from io import BytesIO
-from typing import BinaryIO, Union
+from typing import BinaryIO, Dict, Union
+import zipfile
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
@@ -141,6 +142,41 @@ def export_to_csv(df: pd.DataFrame) -> bytes:
         CSV file as bytes (UTF-8 encoded)
     """
     return df.to_csv(index=False).encode('utf-8')
+
+
+def export_to_zip(files: Dict[str, pd.DataFrame]) -> bytes:
+    """Export multiple DataFrames to a ZIP archive.
+    
+    Creates a ZIP archive containing Excel files for each DataFrame.
+    Each DataFrame is converted to Excel format and stored in the archive
+    with the filename specified in the dictionary key.
+    
+    Args:
+        files: Dictionary mapping filename to DataFrame.
+               Filenames should include .xlsx extension.
+               Example: {"file1_cleaned.xlsx": df1, "file2_cleaned.xlsx": df2}
+        
+    Returns:
+        ZIP file as bytes suitable for Streamlit download
+        
+    Example:
+        >>> files = {
+        ...     "file1_cleaned.xlsx": cleaned_df1,
+        ...     "file1_removed.xlsx": removed_df1,
+        ... }
+        >>> zip_bytes = export_to_zip(files)
+        >>> st.download_button("Download ZIP", zip_bytes, "files.zip")
+    """
+    zip_buffer = BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        for filename, df in files.items():
+            # Convert DataFrame to Excel bytes
+            excel_bytes = export_to_excel(df)
+            # Write Excel bytes to ZIP archive
+            zip_file.writestr(filename, excel_bytes)
+    
+    return zip_buffer.getvalue()
 
 
 # Mapping from internal reason codes to human-readable reasons

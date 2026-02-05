@@ -279,8 +279,10 @@ def test_highlighted_rows_empty_set():
 
 from matching import (
     filter_by_area_code, filter_by_name_match, filter_by_tcpa_phones,
-    filter_by_tcpa_zips, normalize_name, normalize_zip
+    filter_by_tcpa_zips, normalize_name, normalize_zip, load_phones_from_all_tabs
 )
+from io import BytesIO
+import openpyxl
 
 
 # **Feature: refinance-data-cleansing, Property 7: Area Code Matching**
@@ -613,3 +615,200 @@ def test_uuid_filter_removes_invalid():
     
     assert len(result.cleaned_df) == 2
     assert result.removed_count == 3
+
+
+
+# **Feature: multi-file-workflow, Unit Tests for load_phones_from_all_tabs()**
+# **Validates: Requirements 5.2, 5.3**
+
+def create_excel_with_tabs(tabs_data: dict) -> BytesIO:
+    """Helper to create an Excel file with multiple tabs.
+    
+    Args:
+        tabs_data: Dict mapping sheet_name -> list of phone values
+        
+    Returns:
+        BytesIO containing the Excel file
+    """
+    output = BytesIO()
+    workbook = openpyxl.Workbook()
+    
+    # Remove default sheet
+    default_sheet = workbook.active
+    workbook.remove(default_sheet)
+    
+    for sheet_name, phones in tabs_data.items():
+        ws = workbook.create_sheet(title=sheet_name)
+        ws.cell(row=1, column=1, value='Phone')
+        for i, phone in enumerate(phones, start=2):
+            ws.cell(row=i, column=1, value=phone)
+    
+    workbook.save(output)
+    output.seek(0)
+    return output
+
+
+def test_load_phones_from_single_tab():
+    """Test loading phones from a single tab."""
+    excel_file = create_excel_with_tabs({
+        'Sheet1': ['5551234567', '5559876543', '5551112222']
+    })
+    
+    result = load_phones_from_all_tabs(excel_file)
+    
+    assert len(result) == 3
+    assert '5551234567' in result
+    assert '5559876543' in result
+    assert '5551112222' in result
+
+
+def test_load_phones_from_multiple_tabs():
+    """Test loading phones from multiple tabs - all tabs should be read."""
+    excel_file = create_excel_with_tabs({
+        'Tab1': ['5551111111', '5552222222'],
+        'Tab2': ['5553333333', '5554444444'],
+        'Tab3': ['5555555555']
+    })
+    
+    result = load_phones_from_all_tabs(excel_file)
+    
+    # Should have all 5 phones from all 3 tabs
+    assert len(result) == 5
+    assert '5551111111' in result
+    assert '5552222222' in result
+    assert '5553333333' in result
+    assert '5554444444' in result
+    assert '5555555555' in result
+
+
+def test_load_phones_normalizes_formats():
+    """Test that phone numbers are normalized to 10 digits."""
+    excel_file = create_excel_with_tabs({
+        'Sheet1': [
+            '(555) 123-4567',      # Formatted with parens and dashes
+            '555-987-6543',        # Formatted with dashes
+            '555.111.2222',        # Formatted with dots
+            5553334444,            # Integer
+            5.556667777e9,         # Scientific notation (float)
+        ]
+    })
+    
+    result = load_phones_from_all_tabs(excel_file)
+    
+    # All should be normalized to 10 digits
+    assert '5551234567' in result
+    assert '5559876543' in result
+    assert '5551112222' in result
+    assert '5553334444' in result
+    assert '5556667777' in result
+
+
+def test_load_phones_excludes_invalid():
+    """Test that invalid phone numbers are excluded."""
+    excel_file = create_excel_with_tabs({
+        'Sheet1': [
+            '5551234567',    # Valid 10 digits
+            '123456789',     # Only 9 digits - invalid
+            '12345678901',   # 11 digits - invalid
+            '',              # Empty - invalid
+            None,            # None - invalid
+            'not a phone',   # Text - invalid
+        ]
+    })
+    
+    result = load_phones_from_all_tabs(excel_file)
+    
+    # Only the valid 10-digit phone should be included
+    assert len(result) == 1
+    assert '5551234567' in result
+
+
+def test_load_phones_deduplicates_across_tabs():
+    """Test that duplicate phones across tabs are deduplicated."""
+    excel_file = create_excel_with_tabs({
+        'Tab1': ['5551234567', '5559876543'],
+        'Tab2': ['5551234567', '5551112222'],  # 5551234567 is duplicate
+        'Tab3': ['5559876543', '5553334444'],  # 5559876543 is duplicate
+    })
+    
+    result = load_phones_from_all_tabs(excel_file)
+    
+    # Should have 4 unique phones (not 6)
+    assert len(result) == 4
+    assert '5551234567' in result
+    assert '5559876543' in result
+    assert '5551112222' in result
+    assert '5553334444' in result
+
+
+def test_load_phones_handles_empty_tabs():
+    """Test that empty tabs are handled gracefully."""
+    excel_file = create_excel_with_tabs({
+        'Tab1': ['5551234567'],
+        'EmptyTab': [],
+        'Tab3': ['5559876543'],
+    })
+    
+    result = load_phones_from_all_tabs(excel_file)
+    
+    # Should have phones from non-empty tabs
+    assert len(result) == 2
+    assert '5551234567' in result
+    assert '5559876543' in result
+
+
+def test_load_phones_finds_phone_column_by_name():
+    """Test that the function finds columns with 'phone' in the name."""
+    output = BytesIO()
+    workbook = openpyxl.Workbook()
+    ws = workbook.active
+    ws.title = 'Sheet1'
+    
+    # Create columns with different names
+    ws.cell(row=1, column=1, value='ID')
+    ws.cell(row=1, column=2, value='PhoneNumber')  # Should be detected
+    ws.cell(row=1, column=3, value='Name')
+    
+    ws.cell(row=2, column=1, value='1')
+    ws.cell(row=2, column=2, value='5551234567')
+    ws.cell(row=2, column=3, value='John')
+    
+    ws.cell(row=3, column=1, value='2')
+    ws.cell(row=3, column=2, value='5559876543')
+    ws.cell(row=3, column=3, value='Jane')
+    
+    workbook.save(output)
+    output.seek(0)
+    
+    result = load_phones_from_all_tabs(output)
+    
+    assert len(result) == 2
+    assert '5551234567' in result
+    assert '5559876543' in result
+
+
+def test_load_phones_uses_first_column_as_fallback():
+    """Test that first column is used if no 'phone' column exists."""
+    output = BytesIO()
+    workbook = openpyxl.Workbook()
+    ws = workbook.active
+    ws.title = 'Sheet1'
+    
+    # Create columns without 'phone' in name
+    ws.cell(row=1, column=1, value='Numbers')  # First column - should be used
+    ws.cell(row=1, column=2, value='Name')
+    
+    ws.cell(row=2, column=1, value='5551234567')
+    ws.cell(row=2, column=2, value='John')
+    
+    ws.cell(row=3, column=1, value='5559876543')
+    ws.cell(row=3, column=2, value='Jane')
+    
+    workbook.save(output)
+    output.seek(0)
+    
+    result = load_phones_from_all_tabs(output)
+    
+    assert len(result) == 2
+    assert '5551234567' in result
+    assert '5559876543' in result

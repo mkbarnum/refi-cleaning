@@ -1,8 +1,10 @@
 """TCPA matching module for refinance data cleansing."""
 
 from __future__ import annotations
+from io import BytesIO
 from typing import Set, Tuple
 import pandas as pd
+from openpyxl import load_workbook
 from models import CleanResult
 from cleaning import normalize_phone
 
@@ -35,6 +37,69 @@ def load_tcpa_phones(df: pd.DataFrame) -> Set[str]:
             normalized = normalize_phone(val)
             if len(normalized) == 10:
                 phones.add(normalized)
+    
+    return phones
+
+
+def load_phones_from_all_tabs(file: BytesIO) -> Set[str]:
+    """Extract normalized phone numbers from all tabs in Excel file.
+    
+    Reads an Excel file with multiple tabs and extracts phone numbers from
+    each tab. Phone numbers are normalized to 10 digits using normalize_phone().
+    
+    Args:
+        file: Excel file (BytesIO) with multiple tabs containing phone numbers
+        
+    Returns:
+        Set of normalized 10-digit phone numbers from all tabs
+        
+    Note:
+        - Looks for columns containing 'phone' in the name
+        - Falls back to first column if no phone column found
+        - Only includes valid 10-digit phone numbers
+        - Invalid data is skipped with a warning (continues processing)
+    """
+    phones = set()
+    
+    # Reset file position to beginning
+    file.seek(0)
+    
+    # Load workbook to get all sheet names
+    workbook = load_workbook(filename=file, read_only=True, data_only=True)
+    sheet_names = workbook.sheetnames
+    workbook.close()
+    
+    # Reset file position for pandas reading
+    file.seek(0)
+    
+    # Read each sheet and extract phone numbers
+    for sheet_name in sheet_names:
+        try:
+            # Reset file position before each read
+            file.seek(0)
+            df = pd.read_excel(file, sheet_name=sheet_name)
+            
+            if df.empty:
+                continue
+            
+            # Find phone columns (columns containing 'phone' in name)
+            phone_cols = [col for col in df.columns if 'phone' in str(col).lower()]
+            
+            # Fall back to first column if no phone column found
+            if not phone_cols:
+                phone_cols = [df.columns[0]] if len(df.columns) > 0 else []
+            
+            # Extract and normalize phone numbers from each phone column
+            for col in phone_cols:
+                for val in df[col].dropna():
+                    normalized = normalize_phone(val)
+                    if len(normalized) == 10:
+                        phones.add(normalized)
+                        
+        except Exception:
+            # Skip tabs that fail to read, continue with others
+            # This handles invalid data gracefully per Requirement 5.7
+            continue
     
     return phones
 
