@@ -1044,8 +1044,9 @@ def render_multi_step2_clean():
         time.sleep(0.5)
         st.rerun()
     
-    # Show Apply Cleaning button if not done yet
-    if not cleaning_done:
+    # Show Apply Cleaning button only if not done and not currently in progress
+    cleaning_in_progress = st.session_state.get('do_multi_cleaning', False)
+    if not cleaning_done and not cleaning_in_progress:
         if st.button("🧹 Apply Cleaning to All Files", type="primary"):
             st.session_state.do_multi_cleaning = True
             st.rerun()
@@ -1372,8 +1373,9 @@ def render_multi_step3_dnc():
         time.sleep(0.5)
         st.rerun()
     
-    # Show Run DNC button if DNC file is loaded and filtering not done yet
-    if workflow_state.tcpa_dnc_data is not None and not dnc_done:
+    # Show Run DNC button only if DNC file is loaded, not done, and not currently in progress
+    dnc_in_progress = st.session_state.get('do_multi_dnc', False)
+    if workflow_state.tcpa_dnc_data is not None and not dnc_done and not dnc_in_progress:
         if st.button("🔍 Run DNC Filter on All Files", type="primary"):
             st.session_state.do_multi_dnc = True
             st.rerun()
@@ -1658,8 +1660,9 @@ def render_multi_step4_zipcode():
         time.sleep(0.5)
         st.rerun()
     
-    # Show Run Zip Filter button if zip file is loaded and filtering not done yet
-    if workflow_state.tcpa_zips_data is not None and not zip_done:
+    # Show Run Zip Filter button only if zip file is loaded, not done, and not currently in progress
+    zip_in_progress = st.session_state.get('do_multi_zip', False)
+    if workflow_state.tcpa_zips_data is not None and not zip_done and not zip_in_progress:
         if st.button("🔍 Run Zip Code Filter on All Files", type="primary"):
             st.session_state.do_multi_zip = True
             st.rerun()
@@ -1961,8 +1964,9 @@ def render_multi_step5_phones():
         time.sleep(0.5)
         st.rerun()
     
-    # Show Run Phone Filter button if phone file is loaded and filtering not done yet
-    if workflow_state.tcpa_phones_data is not None and not phone_done:
+    # Show Run Phone Filter button only if phone file is loaded, not done, and not currently in progress
+    phone_in_progress = st.session_state.get('do_multi_phone', False)
+    if workflow_state.tcpa_phones_data is not None and not phone_done and not phone_in_progress:
         if st.button("🔍 Run Phone Filter on All Files", type="primary"):
             st.session_state.do_multi_phone = True
             st.rerun()
@@ -2533,8 +2537,9 @@ def render_multi_step7_master_suppression():
         time.sleep(0.5)
         st.rerun()
     
-    # Show Apply Suppression button if master phone list is loaded and suppression not done yet
-    if workflow_state.master_phone_list is not None and len(workflow_state.master_phone_list) > 0 and not suppression_done:
+    # Show Apply Suppression button only if master phone list is loaded, not done, and not currently in progress
+    suppression_in_progress = st.session_state.get('do_multi_suppression', False)
+    if workflow_state.master_phone_list is not None and len(workflow_state.master_phone_list) > 0 and not suppression_done and not suppression_in_progress:
         if st.button("🔍 Apply Suppression to All Files", type="primary"):
             st.session_state.do_multi_suppression = True
             st.rerun()
@@ -2883,8 +2888,9 @@ def render_multi_step8_crossfile_dedupe():
         time.sleep(0.5)
         st.rerun()
     
-    # Show Run Deduplication button if not done yet (Requirement 6.1)
-    if not dedupe_done:
+    # Show Run Deduplication button only if not done and not currently in progress (Requirement 6.1)
+    dedupe_in_progress = st.session_state.get('do_multi_crossfile_dedupe', False)
+    if not dedupe_done and not dedupe_in_progress:
         if st.button("🔄 Run Deduplication", type="primary"):
             st.session_state.do_multi_crossfile_dedupe = True
             st.rerun()
