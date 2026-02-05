@@ -42,30 +42,19 @@ def load_file_with_progress(file_bytes: bytes, filename: str, container=None) ->
     ext = get_file_extension(filename)
     file_size_mb = len(file_bytes) / (1024 * 1024)
     
-    progress_bar = ctx.progress(0)
     status_text = ctx.empty()
     
-    status_text.write(f"📂 Reading file ({file_size_mb:.1f} MB)...")
-    progress_bar.progress(10)
+    # Show what's actually happening - reading the file with pandas
+    file_type = "Excel" if ext in ['.xlsx', '.xls'] else "CSV"
+    status_text.write(f"📂 Reading {file_type} file ({file_size_mb:.1f} MB)...")
     
-    # Simulate staged progress during parsing
-    status_text.write("⏳ Parsing file structure...")
-    progress_bar.progress(30)
-    
-    # Actually read the file
+    # Actually read the file - this is where the real work happens
     df = read_uploaded_file(BytesIO(file_bytes), filename)
     
-    progress_bar.progress(70)
-    status_text.write(f"📊 Processing {len(df):,} rows...")
-    
-    progress_bar.progress(90)
-    status_text.write("✅ Finalizing...")
-    
-    progress_bar.progress(100)
+    status_text.write(f"✅ Loaded {len(df):,} rows")
     time.sleep(0.3)  # Brief pause to show completion
     
-    # Clear progress elements
-    progress_bar.empty()
+    # Clear status
     status_text.empty()
     
     return df
