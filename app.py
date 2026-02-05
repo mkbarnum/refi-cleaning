@@ -638,71 +638,8 @@ def render_multi_step1_upload():
     
     st.write("Upload 5 data files to process through the cleaning pipeline.")
     st.write("Files should be ordered from **newest (File 1)** to **oldest (File 5)**.")
-    st.write("💡 **Tip:** You can select multiple files at once!")
     
     st.divider()
-    
-    # Single multi-file uploader that accepts up to 5 files
-    uploaded_files = st.file_uploader(
-        "Upload up to 5 files",
-        type=['xlsx', 'xls', 'csv'],
-        key='multi_file_batch_upload',
-        accept_multiple_files=True,
-        help="Select up to 5 files at once. Files will be assigned to slots in order."
-    )
-    
-    # Process uploaded files
-    if uploaded_files:
-        # Limit to 5 files
-        files_to_process = uploaded_files[:5]
-        
-        if len(uploaded_files) > 5:
-            st.warning(f"⚠️ Only the first 5 files will be used. You uploaded {len(uploaded_files)} files.")
-        
-        # Process each file and assign to slots
-        for i, uploaded_file in enumerate(files_to_process):
-            file_state = workflow_state.files[i]
-            
-            # Skip if this slot already has this file
-            if file_state.is_uploaded and file_state.filename == uploaded_file.name:
-                continue
-            
-            try:
-                # Read the file
-                file_bytes = uploaded_file.read()
-                uploaded_file.seek(0)  # Reset for potential re-read
-                df = load_file_with_progress(file_bytes, uploaded_file.name)
-                
-                # Validate required columns (Requirement 2.2)
-                is_valid, missing_cols = validate_required_columns(df)
-                
-                if not is_valid:
-                    st.error(f"❌ File {i+1} ({uploaded_file.name}): Missing columns: {', '.join(missing_cols)}")
-                else:
-                    # Filter to only required columns
-                    df, dropped_cols = filter_to_required_columns(df)
-                    
-                    # Store in MultiFileState (Requirement 2.7)
-                    workflow_state.files[i].raw_df = df.copy()
-                    workflow_state.files[i].cleaned_df = df.copy()
-                    workflow_state.files[i].filename = uploaded_file.name
-                    workflow_state.files[i].is_uploaded = True
-                    
-            except Exception as e:
-                st.error(f"❌ File {i+1} ({uploaded_file.name}): Error loading - {e}")
-    
-    st.divider()
-    
-    # Display file slots with status and option to clear individual files
-    st.subheader("📁 File Slots")
-    
-    row1_cols = st.columns(3)
-    row2_cols = st.columns([1, 1, 1])
-    
-    file_columns = [
-        row1_cols[0], row1_cols[1], row1_cols[2],
-        row2_cols[0], row2_cols[1]
-    ]
     
     # Labels for file slots
     file_labels = [
@@ -713,6 +650,17 @@ def render_multi_step1_upload():
         "File 5 (oldest)"
     ]
     
+    # Create 5 separate file uploaders in a grid layout
+    # Row 1: Files 1-3
+    row1_cols = st.columns(3)
+    # Row 2: Files 4-5 (centered)
+    row2_cols = st.columns([1, 1, 1])
+    
+    file_columns = [
+        row1_cols[0], row1_cols[1], row1_cols[2],
+        row2_cols[0], row2_cols[1]
+    ]
+    
     for i in range(5):
         file_num = i + 1
         file_state = workflow_state.files[i]
@@ -721,6 +669,7 @@ def render_multi_step1_upload():
             st.markdown(f"**{file_labels[i]}**")
             
             if file_state.is_uploaded and file_state.cleaned_df is not None:
+                # File already uploaded - show status and clear button
                 st.success(f"✓ {file_state.filename}")
                 st.write(f"Rows: {len(file_state.cleaned_df):,}")
                 
@@ -728,7 +677,39 @@ def render_multi_step1_upload():
                     workflow_state.files[i] = MultiFileState()
                     st.rerun()
             else:
-                st.info("⏳ Pending")
+                # Show file uploader for this slot
+                uploaded_file = st.file_uploader(
+                    f"Upload {file_labels[i]}",
+                    type=['xlsx', 'xls', 'csv'],
+                    key=f'multi_file_upload_{file_num}',
+                    label_visibility="collapsed"
+                )
+                
+                if uploaded_file is not None:
+                    try:
+                        # Read the file
+                        file_bytes = uploaded_file.read()
+                        uploaded_file.seek(0)  # Reset for potential re-read
+                        df = load_file_with_progress(file_bytes, uploaded_file.name)
+                        
+                        # Validate required columns (Requirement 2.2)
+                        is_valid, missing_cols = validate_required_columns(df)
+                        
+                        if not is_valid:
+                            st.error(f"❌ Missing: {', '.join(missing_cols)}")
+                        else:
+                            # Filter to only required columns
+                            df, dropped_cols = filter_to_required_columns(df)
+                            
+                            # Store in MultiFileState (Requirement 2.7)
+                            workflow_state.files[i].raw_df = df.copy()
+                            workflow_state.files[i].cleaned_df = df.copy()
+                            workflow_state.files[i].filename = uploaded_file.name
+                            workflow_state.files[i].is_uploaded = True
+                            st.rerun()
+                            
+                    except Exception as e:
+                        st.error(f"❌ Error: {e}")
     
     st.divider()
     
