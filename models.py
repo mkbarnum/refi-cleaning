@@ -72,6 +72,7 @@ class MultiFileState:
     removed_df: Optional[pd.DataFrame] = None   # Accumulated removed rows
     filename: Optional[str] = None              # Original filename
     is_uploaded: bool = False                   # Upload status
+    raw_file_bytes: Optional[bytes] = None      # File 1 only: bytes for highlight detection in Step 2
     
     # Per-step results for detailed tracking
     step_results: Dict[int, StepResult] = field(default_factory=dict)

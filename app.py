@@ -676,27 +676,18 @@ def render_multi_step1_upload():
                 
                 if uploaded_file is not None:
                     try:
-                        # Read the file
                         file_bytes = uploaded_file.read()
-                        uploaded_file.seek(0)  # Reset for potential re-read
+                        uploaded_file.seek(0)
+                        # Fast read only — no validation or column filtering yet (done in Step 2)
                         df = load_file_with_progress(file_bytes, uploaded_file.name)
-                        
-                        # Validate required columns (Requirement 2.2)
-                        is_valid, missing_cols = validate_required_columns(df)
-                        
-                        if not is_valid:
-                            st.error(f"❌ Missing: {', '.join(missing_cols)}")
-                        else:
-                            # Filter to only required columns
-                            df, dropped_cols = filter_to_required_columns(df)
-                            
-                            # Store in MultiFileState (Requirement 2.7)
-                            workflow_state.files[i].raw_df = df.copy()
-                            workflow_state.files[i].cleaned_df = df.copy()
-                            workflow_state.files[i].filename = uploaded_file.name
-                            workflow_state.files[i].is_uploaded = True
-                            st.rerun()
-                            
+                        workflow_state.files[i].raw_df = df.copy()
+                        workflow_state.files[i].cleaned_df = df.copy()
+                        workflow_state.files[i].filename = uploaded_file.name
+                        workflow_state.files[i].is_uploaded = True
+                        # Keep bytes for File 1 only (highlight detection in Step 2)
+                        if i == 0:
+                            workflow_state.files[i].raw_file_bytes = file_bytes
+                        st.rerun()
                     except Exception as e:
                         st.error(f"❌ Error: {e}")
     
@@ -848,9 +839,23 @@ def render_multi_step2_clean():
     # Check if we need to do cleaning
     if st.session_state.get('do_multi_cleaning', False):
         st.session_state.do_multi_cleaning = False
-        
-        # Define cleaning steps for progress display
+
+        # Validate required columns for all 5 files before any processing
+        validation_errors = []
+        for i, file_state in enumerate(workflow_state.files):
+            if file_state.cleaned_df is None:
+                continue
+            is_valid, missing_cols = validate_required_columns(file_state.cleaned_df)
+            if not is_valid:
+                validation_errors.append((i + 1, file_state.filename or f"File {i + 1}", missing_cols))
+        if validation_errors:
+            for file_num, name, missing in validation_errors:
+                st.error(f"File {file_num} ({name}): missing columns: {', '.join(missing)}. Please re-upload.")
+            st.rerun()
+
+        # Define cleaning steps for progress display (Prepare + 9 steps)
         cleaning_steps = [
+            "Prepare files (File 1: highlights + columns; Files 2–5: columns)",
             "Filter invalid last names",
             "Filter empty phones",
             "Filter invalid phones",
@@ -861,21 +866,21 @@ def render_multi_step2_clean():
             "Filter prohibited content",
             "Filter invalid UUIDs"
         ]
-        
+
         # Full-width progress display
         st.subheader("🧹 Cleaning all 5 files...")
         progress_bar = st.progress(0)
         status_placeholder = st.empty()
-        
+
         # Track removal stats per file
         file_removal_summaries = [{} for _ in range(5)]
         file_before_counts = []
         file_after_counts = []
-        
-        # Store before counts
+
+        # Store before counts (before prepare)
         for file_state in workflow_state.files:
             file_before_counts.append(len(file_state.cleaned_df) if file_state.cleaned_df is not None else 0)
-        
+
         def update_progress(step_idx, step_name):
             progress_bar.progress((step_idx + 1) / len(cleaning_steps))
             with status_placeholder.container():
@@ -887,15 +892,38 @@ def render_multi_step2_clean():
                     else:
                         st.write(f"⬜ {s}")
             time.sleep(0.05)
-        
+
         # Show initial state
         with status_placeholder.container():
             st.write(f"⏳ {cleaning_steps[0]}...")
             for s in cleaning_steps[1:]:
                 st.write(f"⬜ {s}")
-        
-        # 1. Filter invalid last names (Requirement 3.4 - reuse existing logic)
+
+        # 0. Prepare: File 1 only — highlight detection + remove highlighted rows; all 5 — filter to required columns
         update_progress(0, cleaning_steps[0])
+        file1 = workflow_state.files[0]
+        if file1.raw_file_bytes and file1.filename and get_file_extension(file1.filename) in ['.xlsx', '.xls']:
+            try:
+                _, highlighted = read_excel_with_highlights(BytesIO(file1.raw_file_bytes))
+                res = remove_highlighted_rows(file1.cleaned_df, highlighted)
+                file1.cleaned_df = res.cleaned_df
+                if res.removed_count > 0:
+                    res.removed_df = res.removed_df.copy()
+                    res.removed_df['_removal_reason'] = 'highlighted_cells'
+                    if file1.removed_df is None:
+                        file1.removed_df = res.removed_df
+                    else:
+                        file1.removed_df = pd.concat([file1.removed_df, res.removed_df], ignore_index=True)
+                    file_removal_summaries[0]['Highlighted cells'] = res.removed_count
+            except Exception:
+                pass  # If highlight detection fails, continue without it
+        for i, file_state in enumerate(workflow_state.files):
+            if file_state.cleaned_df is not None:
+                df, _ = filter_to_required_columns(file_state.cleaned_df)
+                file_state.cleaned_df = df
+
+        # 1. Filter invalid last names (Requirement 3.4 - reuse existing logic)
+        update_progress(1, cleaning_steps[1])
         results = apply_cleaning_to_all_files(
             lambda df: filter_invalid_last_names(df, mapping.last_name),
             workflow_state.files,
@@ -906,7 +934,7 @@ def render_multi_step2_clean():
                 file_removal_summaries[i]['Invalid last name'] = result.removal_summary.get('invalid_last_name', 0)
         
         # 2. Filter empty phones
-        update_progress(1, cleaning_steps[1])
+        update_progress(2, cleaning_steps[2])
         results = apply_cleaning_to_all_files(
             lambda df: filter_empty_phones(df, mapping.phone),
             workflow_state.files,
@@ -917,7 +945,7 @@ def render_multi_step2_clean():
                 file_removal_summaries[i]['Empty phone'] = result.removal_summary.get('empty_phone', 0)
         
         # 3. Filter invalid phones
-        update_progress(2, cleaning_steps[2])
+        update_progress(3, cleaning_steps[3])
         results = apply_cleaning_to_all_files(
             lambda df: filter_invalid_phones(df, mapping.phone),
             workflow_state.files,
@@ -928,7 +956,7 @@ def render_multi_step2_clean():
                 file_removal_summaries[i]['Invalid phone'] = result.removal_summary.get('invalid_phone', 0)
         
         # 4. Filter invalid emails
-        update_progress(3, cleaning_steps[3])
+        update_progress(4, cleaning_steps[4])
         results = apply_cleaning_to_all_files(
             lambda df: filter_invalid_emails(df, mapping.email),
             workflow_state.files,
@@ -939,7 +967,7 @@ def render_multi_step2_clean():
                 file_removal_summaries[i]['Invalid email'] = result.removal_summary.get('invalid_email', 0)
         
         # 5. Filter TEST entries
-        update_progress(4, cleaning_steps[4])
+        update_progress(5, cleaning_steps[5])
         results = apply_cleaning_to_all_files(
             lambda df: filter_test_entries(df, mapping.first_name, mapping.last_name),
             workflow_state.files,
@@ -950,7 +978,7 @@ def render_multi_step2_clean():
                 file_removal_summaries[i]['Contains TEST'] = result.removal_summary.get('contains_test', 0)
         
         # 6. Filter placeholder emails
-        update_progress(5, cleaning_steps[5])
+        update_progress(6, cleaning_steps[6])
         if mapping.email:
             results = apply_cleaning_to_all_files(
                 lambda df: filter_placeholder_emails(df, mapping.email),
@@ -962,7 +990,7 @@ def render_multi_step2_clean():
                     file_removal_summaries[i]['Placeholder email'] = result.removal_summary.get('placeholder_email', 0)
         
         # 7. Filter fake/suspicious emails
-        update_progress(6, cleaning_steps[6])
+        update_progress(7, cleaning_steps[7])
         if mapping.email:
             results = apply_cleaning_to_all_files(
                 lambda df: filter_fake_emails(df, mapping.email),
@@ -974,7 +1002,7 @@ def render_multi_step2_clean():
                     file_removal_summaries[i]['Fake email'] = result.removal_summary.get('fake_email', 0)
         
         # 8. Filter prohibited content
-        update_progress(7, cleaning_steps[7])
+        update_progress(8, cleaning_steps[8])
         results = apply_cleaning_to_all_files(
             lambda df: filter_prohibited_content(df),
             workflow_state.files,
@@ -985,7 +1013,7 @@ def render_multi_step2_clean():
                 file_removal_summaries[i]['Prohibited content'] = result.removal_summary.get('prohibited_content', 0)
         
         # 9. Filter invalid UUIDs
-        update_progress(8, cleaning_steps[8])
+        update_progress(9, cleaning_steps[9])
         if mapping.lead_id:
             results = apply_cleaning_to_all_files(
                 lambda df: filter_invalid_uuid(df, mapping.lead_id),
@@ -2036,12 +2064,7 @@ def render_multi_step5_phones():
 def render_multi_step6_download():
     """Step 6: Download cleaned files and removed rows for multi-file workflow.
     
-    Provides download buttons for:
-    - Each of the 5 cleaned files (file1_cleaned.xlsx through file5_cleaned.xlsx)
-    - Each of the 5 removed-rows files (file1_removed.xlsx through file5_removed.xlsx)
-    - A ZIP archive containing all 10 files
-    
-    Requirements: 4.1, 4.2, 4.3, 4.4, 4.5
+    Provides a single ZIP download containing all 5 cleaned files and 5 removed-rows files.
     """
     st.header("Step 6: Download Cleaned Files")
     
@@ -2069,62 +2092,30 @@ def render_multi_step6_download():
             st.rerun()
         return
     
-    st.write("Download your cleaned files and removed rows from the initial cleaning steps.")
-    st.write("You can download individual files or all files as a ZIP archive.")
-    
-    st.divider()
-    
-    # Display summary of files
-    st.subheader("📊 File Summary")
-    
-    summary_data = []
-    total_cleaned_rows = 0
-    total_removed_rows = 0
-    
-    for i, file_state in enumerate(workflow_state.files):
-        file_num = i + 1
-        cleaned_count = len(file_state.cleaned_df) if file_state.cleaned_df is not None else 0
-        removed_count = len(file_state.removed_df) if file_state.removed_df is not None else 0
-        
-        total_cleaned_rows += cleaned_count
-        total_removed_rows += removed_count
-        
-        summary_data.append({
-            "File": f"File {file_num}",
-            "Filename": file_state.filename or "—",
-            "Cleaned Rows": f"{cleaned_count:,}",
-            "Removed Rows": f"{removed_count:,}"
-        })
-    
-    # Add totals row
-    summary_data.append({
-        "File": "**TOTAL**",
-        "Filename": "—",
-        "Cleaned Rows": f"**{total_cleaned_rows:,}**",
-        "Removed Rows": f"**{total_removed_rows:,}**"
-    })
-    
-    summary_df = pd.DataFrame(summary_data)
-    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    st.write("Download your cleaned files and removed rows from the initial cleaning steps as a ZIP archive.")
     
     st.divider()
     
     # Download All as ZIP section (Requirement 4.4, 4.5)
     st.subheader("📦 Download All Files as ZIP")
     
-    # Build the files dictionary for ZIP export
+    # Build the files dictionary for ZIP export (original name + " (CLEANED)" / " (REMOVED)")
+    def _zip_name(original_filename: str, suffix: str, file_num: int) -> str:
+        if not original_filename or not original_filename.strip():
+            return f"File{file_num} ({suffix}).xlsx"
+        base = original_filename.rsplit(".", 1)[0] if "." in original_filename else original_filename
+        return f"{base} ({suffix}).xlsx"
+
     zip_files = {}
     for i, file_state in enumerate(workflow_state.files):
         file_num = i + 1
-        
-        # Add cleaned file (Requirement 4.5 - descriptive naming)
+        orig = (file_state.filename or "").strip()
+
         if file_state.cleaned_df is not None and len(file_state.cleaned_df) > 0:
-            zip_files[f"file{file_num}_cleaned.xlsx"] = file_state.cleaned_df
-        
-        # Add removed file (Requirement 4.5 - descriptive naming)
+            zip_files[_zip_name(orig, "CLEANED", file_num)] = file_state.cleaned_df
         if file_state.removed_df is not None and len(file_state.removed_df) > 0:
-            zip_files[f"file{file_num}_removed.xlsx"] = file_state.removed_df
-    
+            zip_files[_zip_name(orig, "REMOVED", file_num)] = file_state.removed_df
+
     # Cache key for ZIP file
     cache_key_zip = "excel_cache_multi_step6_zip"
     
@@ -2145,104 +2136,9 @@ def render_multi_step6_download():
                 use_container_width=True,
                 key="download_all_zip"
             )
-            st.caption(f"Contains {len(zip_files)} files ({len([f for f in zip_files if 'cleaned' in f])} cleaned + {len([f for f in zip_files if 'removed' in f])} removed)")
+            st.caption(f"Contains {len(zip_files)} files ({len([f for f in zip_files if 'CLEANED' in f])} cleaned + {len([f for f in zip_files if 'REMOVED' in f])} removed)")
         else:
             st.warning("No files available for download.")
-    
-    st.divider()
-    
-    # Individual file downloads section (Requirements 4.1, 4.2, 4.3)
-    st.subheader("📄 Download Individual Files")
-    
-    # Create tabs for Cleaned Files and Removed Files
-    tab_cleaned, tab_removed = st.tabs(["🧹 Cleaned Files", "🗑️ Removed Rows"])
-    
-    mapping = workflow_state.column_mapping
-    
-    with tab_cleaned:
-        st.write("Download the cleaned data files (after all cleaning steps):")
-        
-        # Display download buttons for each of 5 cleaned files (Requirement 4.1)
-        cols = st.columns(5)
-        
-        for i, file_state in enumerate(workflow_state.files):
-            file_num = i + 1
-            
-            with cols[i]:
-                st.write(f"**File {file_num}**")
-                
-                if file_state.cleaned_df is not None and len(file_state.cleaned_df) > 0:
-                    row_count = len(file_state.cleaned_df)
-                    st.write(f"{row_count:,} rows")
-                    
-                    # Cache key for this file's Excel
-                    cache_key = f"excel_cache_multi_step6_cleaned_{file_num}"
-                    
-                    # Only generate Excel if not cached
-                    if cache_key not in st.session_state:
-                        st.session_state[cache_key] = export_to_excel(file_state.cleaned_df)
-                    
-                    # Download button (Requirement 4.3 - export to Excel format)
-                    st.download_button(
-                        label="📥 Download",
-                        data=st.session_state[cache_key],
-                        file_name=f"file{file_num}_cleaned.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key=f"download_cleaned_{file_num}",
-                        use_container_width=True
-                    )
-                else:
-                    st.write("No data")
-                    st.button(
-                        "📥 Download",
-                        disabled=True,
-                        key=f"download_cleaned_{file_num}_disabled",
-                        use_container_width=True
-                    )
-    
-    with tab_removed:
-        st.write("Download the removed rows files (rows removed during cleaning):")
-        
-        # Display download buttons for each of 5 removed-rows files (Requirement 4.2)
-        cols = st.columns(5)
-        
-        for i, file_state in enumerate(workflow_state.files):
-            file_num = i + 1
-            
-            with cols[i]:
-                st.write(f"**File {file_num}**")
-                
-                if file_state.removed_df is not None and len(file_state.removed_df) > 0:
-                    row_count = len(file_state.removed_df)
-                    st.write(f"{row_count:,} rows")
-                    
-                    # Cache key for this file's Excel
-                    cache_key = f"excel_cache_multi_step6_removed_{file_num}"
-                    
-                    # Only generate Excel if not cached
-                    if cache_key not in st.session_state:
-                        st.session_state[cache_key] = export_removed_rows_to_excel(
-                            file_state.removed_df, 
-                            mapping
-                        )
-                    
-                    # Download button (Requirement 4.3 - export to Excel format)
-                    st.download_button(
-                        label="📥 Download",
-                        data=st.session_state[cache_key],
-                        file_name=f"file{file_num}_removed.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key=f"download_removed_{file_num}",
-                        use_container_width=True
-                    )
-                else:
-                    st.write("No rows removed")
-                    st.button(
-                        "📥 Download",
-                        disabled=True,
-                        key=f"download_removed_{file_num}_disabled",
-                        use_container_width=True
-                    )
     
     st.divider()
     
@@ -2965,16 +2861,7 @@ def render_multi_step8_crossfile_dedupe():
 
 
 def render_multi_final_download():
-    """Final Download: Download all 5 final files after all processing is complete.
-    
-    Provides download buttons for:
-    - Each of the 5 final files (file1_final.xlsx through file5_final.xlsx)
-    - A ZIP archive containing all 5 final files
-    
-    Displays the final row count for each file before download.
-    
-    Requirements: 7.1, 7.2, 7.3, 7.4, 7.5
-    """
+    """Final Download: Download all 5 final files as a single ZIP after all processing is complete."""
     st.header("Final Download")
     
     # Get workflow state
@@ -3002,51 +2889,27 @@ def render_multi_final_download():
         return
     
     st.success("🎉 All processing complete! Your files are ready for download.")
-    st.write("Download your final cleaned files after all processing steps (cleaning, suppression, and deduplication).")
-    
-    st.divider()
-    
-    # Display final row count for each file (Requirement 7.5)
-    st.subheader("📊 Final File Summary")
-    
-    summary_data = []
-    total_final_rows = 0
-    
-    for i, file_state in enumerate(workflow_state.files):
-        file_num = i + 1
-        final_count = len(file_state.cleaned_df) if file_state.cleaned_df is not None else 0
-        total_final_rows += final_count
-        
-        summary_data.append({
-            "File": f"File {file_num}",
-            "Filename": file_state.filename or "—",
-            "Final Row Count": f"{final_count:,}"
-        })
-    
-    # Add totals row
-    summary_data.append({
-        "File": "**TOTAL**",
-        "Filename": "—",
-        "Final Row Count": f"**{total_final_rows:,}**"
-    })
-    
-    summary_df = pd.DataFrame(summary_data)
-    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    st.write("Download your final cleaned files after all processing steps (cleaning, suppression, and deduplication) as a ZIP archive.")
     
     st.divider()
     
     # Download All as ZIP section (Requirement 7.2, 7.4)
     st.subheader("📦 Download All Final Files as ZIP")
     
-    # Build the files dictionary for ZIP export
+    # Build the files dictionary for ZIP export (original name + " (CLEANED)")
+    def _final_zip_name(original_filename: str, file_num: int) -> str:
+        if not original_filename or not original_filename.strip():
+            return f"File{file_num} (CLEANED).xlsx"
+        base = original_filename.rsplit(".", 1)[0] if "." in original_filename else original_filename
+        return f"{base} (CLEANED).xlsx"
+
     zip_files = {}
     for i, file_state in enumerate(workflow_state.files):
         file_num = i + 1
-        
-        # Add final file (Requirement 7.4 - descriptive naming: file1_final.xlsx, etc.)
+        orig = (file_state.filename or "").strip()
         if file_state.cleaned_df is not None and len(file_state.cleaned_df) > 0:
-            zip_files[f"file{file_num}_final.xlsx"] = file_state.cleaned_df
-    
+            zip_files[_final_zip_name(orig, file_num)] = file_state.cleaned_df
+
     # Cache key for ZIP file
     cache_key_zip = "excel_cache_multi_final_zip"
     
@@ -3070,51 +2933,6 @@ def render_multi_final_download():
             st.caption(f"Contains {len(zip_files)} final files")
         else:
             st.warning("No files available for download.")
-    
-    st.divider()
-    
-    # Individual file downloads section (Requirements 7.1, 7.3)
-    st.subheader("📄 Download Individual Final Files")
-    
-    st.write("Download each final file individually:")
-    
-    # Display download buttons for each of 5 final files (Requirement 7.1)
-    cols = st.columns(5)
-    
-    for i, file_state in enumerate(workflow_state.files):
-        file_num = i + 1
-        
-        with cols[i]:
-            st.write(f"**File {file_num}**")
-            
-            if file_state.cleaned_df is not None and len(file_state.cleaned_df) > 0:
-                row_count = len(file_state.cleaned_df)
-                st.write(f"{row_count:,} rows")
-                
-                # Cache key for this file's Excel
-                cache_key = f"excel_cache_multi_final_{file_num}"
-                
-                # Only generate Excel if not cached
-                if cache_key not in st.session_state:
-                    st.session_state[cache_key] = export_to_excel(file_state.cleaned_df)
-                
-                # Download button (Requirement 7.3 - export to Excel format)
-                st.download_button(
-                    label="📥 Download",
-                    data=st.session_state[cache_key],
-                    file_name=f"file{file_num}_final.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"download_final_{file_num}",
-                    use_container_width=True
-                )
-            else:
-                st.write("No data")
-                st.button(
-                    "📥 Download",
-                    disabled=True,
-                    key=f"download_final_{file_num}_disabled",
-                    use_container_width=True
-                )
     
     st.divider()
     
@@ -3210,13 +3028,15 @@ def main():
         # Get available multi-file steps (excluding "Home" which is index 0)
         multi_steps_display = MULTI_FILE_STEPS[1:]  # Skip "Home" entry
         
-        # Step navigation using multi-file steps
+        # Step navigation using multi-file steps (key by current_step so programmatic
+        # navigation e.g. "Next → Final Download" actually switches the selected step)
         current_step = st.session_state.current_step
         step_index = multi_steps_display.index(current_step) if current_step in multi_steps_display else 0
         step = st.sidebar.radio(
             "Select Step",
             multi_steps_display,
-            index=step_index
+            index=step_index,
+            key=f"multi_step_radio_{current_step}"
         )
         st.session_state.current_step = step
         

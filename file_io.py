@@ -12,6 +12,15 @@ from openpyxl.styles import PatternFill
 VALID_EXTENSIONS = {'.xlsx', '.xls', '.csv'}
 
 
+def _excel_engine() -> str:
+    """Return the fastest available Excel engine (calamine if installed)."""
+    try:
+        import python_calamine  # noqa: F401
+        return "calamine"
+    except ImportError:
+        return "openpyxl"
+
+
 def get_file_extension(filename: str) -> str:
     """Extract lowercase file extension from filename."""
     if '.' not in filename:
@@ -44,8 +53,7 @@ def read_uploaded_file(file: Union[BinaryIO, BytesIO], filename: str) -> pd.Data
     
     if ext == '.csv':
         return pd.read_csv(file)
-    else:
-        return pd.read_excel(file)
+    return pd.read_excel(file, engine=_excel_engine())
 
 
 def read_excel_with_highlights(file: Union[BinaryIO, BytesIO], progress_callback=None) -> tuple[pd.DataFrame, set[tuple[int, int]]]:
@@ -62,8 +70,8 @@ def read_excel_with_highlights(file: Union[BinaryIO, BytesIO], progress_callback
     if progress_callback:
         progress_callback(5, "Reading Excel data...")
     
-    # First, read the data quickly with pandas
-    df = pd.read_excel(file, engine='openpyxl')
+    # First, read the data quickly (calamine if available)
+    df = pd.read_excel(file, engine=_excel_engine())
     
     if progress_callback:
         progress_callback(20, "Loading workbook for highlight detection...")
@@ -105,15 +113,8 @@ def read_excel_with_highlights(file: Union[BinaryIO, BytesIO], progress_callback
 
 
 def read_excel_fast(file: Union[BinaryIO, BytesIO]) -> pd.DataFrame:
-    """Read Excel file quickly without highlight detection.
-    
-    Args:
-        file: File-like object containing Excel data
-        
-    Returns:
-        DataFrame with the file contents
-    """
-    return pd.read_excel(file, engine='openpyxl')
+    """Read Excel file quickly without highlight detection."""
+    return pd.read_excel(file, engine=_excel_engine())
 
 
 
