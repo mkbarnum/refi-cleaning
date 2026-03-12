@@ -20,6 +20,7 @@ class ColumnMapping:
     email: Optional[str] = None          # Maps to Email
     zip_code: Optional[str] = None       # Maps to ZipCode
     lead_id: Optional[str] = None        # Maps to Universal_LeadId
+    state: Optional[str] = None          # Maps to State
 
 
 # Common column name patterns for auto-detection
@@ -30,6 +31,7 @@ COLUMN_PATTERNS = {
     'email': ['Email', 'EmailAddress', 'email', 'E-mail'],
     'zip_code': ['ZipCode', 'Zip_Code', 'Zip Code', 'Zip', 'zipcode', 'zip'],
     'lead_id': ['Universal_LeadId', 'LeadId', 'Lead_Id', 'UUID', 'ID'],
+    'state': ['State', 'STATE', 'StateCode', 'state', 'St'],
 }
 
 

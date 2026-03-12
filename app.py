@@ -3,8 +3,9 @@
 import streamlit as st
 import pandas as pd
 import time
+import zipfile
 from io import BytesIO
-from typing import Callable, List
+from typing import Callable, List, Optional, Set
 
 from models import ColumnMapping, CleanResult, StepResult, MultiFileState, MultiFileWorkflowState
 from file_io import (
@@ -18,7 +19,7 @@ from cleaning import (
     filter_test_entries, filter_placeholder_emails, filter_prohibited_content,
     remove_duplicate_phones, filter_invalid_uuid, normalize_phone,
     validate_required_columns, filter_to_required_columns, REQUIRED_COLUMNS,
-    filter_fake_emails, dedupe_against_files
+    filter_fake_emails, dedupe_against_files, filter_by_bad_states
 )
 from matching import (
     load_tcpa_phones, load_tcpa_zipcodes, load_ld_dnc,
@@ -94,6 +95,8 @@ def init_session_state():
         st.session_state.step3_result = None
     if 'step4_result' not in st.session_state:
         st.session_state.step4_result = None
+    if 'step1b_result' not in st.session_state:
+        st.session_state.step1b_result = None
     if 'current_step' not in st.session_state:
         st.session_state.current_step = "1. Upload Raw Data"
     # Step 6: Cross-file deduplication state
@@ -131,10 +134,11 @@ SINGLE_FILE_STEPS = [
     "3. TCPA DNC File",
     "4. Zip Code Removal",
     "5. Phone Number Removal",
-    "6. Cross-File Dedupe"
+    "6. Cross-File Dedupe",
+    "7. Bad States"
 ]
 
-# Multi-file workflow steps (new 8-step workflow)
+# Multi-file workflow steps (9-step workflow)
 MULTI_FILE_STEPS = [
     "Home",
     "1. Upload 5 Files",
@@ -145,6 +149,7 @@ MULTI_FILE_STEPS = [
     "6. Download Cleaned Files",
     "7. Master Phone Suppression",
     "8. Cross-File Dedupe",
+    "9. Bad States",
     "Final Download"
 ]
 
@@ -168,6 +173,7 @@ def clear_single_file_state():
     st.session_state.raw_file_bytes = None
     st.session_state.raw_file_ext = None
     st.session_state.step1_result = None
+    st.session_state.step1b_result = None
     st.session_state.step2_result = None
     st.session_state.step3_result = None
     st.session_state.step4_result = None
@@ -258,6 +264,7 @@ def has_existing_workflow_state() -> bool:
     has_single_file_state = (
         st.session_state.raw_data is not None or
         st.session_state.step1_result is not None or
+        st.session_state.step1b_result is not None or
         st.session_state.step2_result is not None or
         st.session_state.step3_result is not None or
         st.session_state.step4_result is not None
@@ -424,7 +431,7 @@ def validate_multi_file_state_for_step(required_step: int) -> tuple[bool, str]:
     
     # Check step-specific prerequisites
     if required_step >= 3:
-        # Step 3 requires Step 2 (Clean Bad Data) to be complete
+        # Step 3 (DNC) requires Step 2 (Clean Bad Data) to be complete
         cleaning_done = all(
             2 in file_state.step_results 
             for file_state in workflow_state.files 
@@ -434,7 +441,7 @@ def validate_multi_file_state_for_step(required_step: int) -> tuple[bool, str]:
             return False, "2. Clean Bad Data"
     
     if required_step >= 4:
-        # Step 4 requires Step 3 (TCPA DNC) to be complete
+        # Step 4 (Zip) requires Step 3 (DNC) to be complete
         dnc_done = all(
             3 in file_state.step_results 
             for file_state in workflow_state.files 
@@ -444,7 +451,7 @@ def validate_multi_file_state_for_step(required_step: int) -> tuple[bool, str]:
             return False, "3. TCPA DNC File"
     
     if required_step >= 5:
-        # Step 5 requires Step 4 (Zip Code Removal) to be complete
+        # Step 5 (Phone) requires Step 4 (Zip) to be complete
         zip_done = all(
             4 in file_state.step_results 
             for file_state in workflow_state.files 
@@ -453,18 +460,8 @@ def validate_multi_file_state_for_step(required_step: int) -> tuple[bool, str]:
         if not zip_done:
             return False, "4. Zip Code Removal"
     
+    # Steps 6 (Download), 7 (Master) require Step 5 (Phone) to be complete
     if required_step >= 6:
-        # Step 6 requires Step 5 (Phone Number Removal) to be complete
-        phone_done = all(
-            5 in file_state.step_results 
-            for file_state in workflow_state.files 
-            if file_state.is_uploaded
-        )
-        if not phone_done:
-            return False, "5. Phone Number Removal"
-    
-    # Steps 7 and 8 require Step 5 to be complete (Step 6 is download, doesn't modify data)
-    if required_step >= 7:
         phone_done = all(
             5 in file_state.step_results 
             for file_state in workflow_state.files 
@@ -474,7 +471,7 @@ def validate_multi_file_state_for_step(required_step: int) -> tuple[bool, str]:
             return False, "5. Phone Number Removal"
     
     if required_step >= 8:
-        # Step 8 requires Step 7 (Master Phone Suppression) to be complete
+        # Step 8 (Cross-File Dedupe) requires Step 7 (Master Phone Suppression) to be complete
         suppression_done = all(
             7 in file_state.step_results 
             for file_state in workflow_state.files 
@@ -482,6 +479,16 @@ def validate_multi_file_state_for_step(required_step: int) -> tuple[bool, str]:
         )
         if not suppression_done:
             return False, "7. Master Phone Suppression"
+    
+    if required_step >= 9:
+        # Step 9 (Bad States) requires Step 8 (Cross-File Dedupe) to be complete
+        dedupe_done = all(
+            8 in file_state.step_results 
+            for file_state in workflow_state.files 
+            if file_state.is_uploaded
+        )
+        if not dedupe_done:
+            return False, "8. Cross-File Dedupe"
     
     return True, ""
 
@@ -604,7 +611,7 @@ def apply_cleaning_to_all_files(
 def render_multi_step1_upload():
     """Step 1: Upload 5 data files for multi-file workflow.
     
-    Displays a single multi-file uploader that accepts up to 5 files at once.
+    Displays 5 separate file uploaders (one file per slot; one file at a time per upload).
     For each upload:
     - Validates that the file contains all required columns
     - Stores the DataFrame in MultiFileState
@@ -627,6 +634,7 @@ def render_multi_step1_upload():
     
     st.write("Upload 5 data files to process through the cleaning pipeline.")
     st.write("Files should be ordered from **newest (File 1)** to **oldest (File 5)**.")
+    st.caption("Upload **one file at a time** — each slot accepts a single file only.")
     
     st.divider()
     
@@ -666,12 +674,13 @@ def render_multi_step1_upload():
                     workflow_state.files[i] = MultiFileState()
                     st.rerun()
             else:
-                # Show file uploader for this slot
+                # Show file uploader for this slot (one file only per slot)
                 uploaded_file = st.file_uploader(
                     f"Upload {file_labels[i]}",
                     type=['xlsx', 'xls', 'csv'],
                     key=f'multi_file_upload_{file_num}',
-                    label_visibility="collapsed"
+                    label_visibility="collapsed",
+                    accept_multiple_files=False
                 )
                 
                 if uploaded_file is not None:
@@ -1141,6 +1150,142 @@ def render_multi_step2_clean():
             st.rerun()
 
 
+def render_multi_step9_bad_states():
+    """Step 9: Bad States — remove rows where STATE is in uploaded list and optionally AZ, DE, TX."""
+    st.header("Step 9: Bad States (Multi-File)")
+    
+    workflow_state = st.session_state.multi_file_state
+    if workflow_state is None:
+        st.warning("Please complete Step 1 (Upload 5 Files) first.")
+        if st.button("← Go to Step 1"):
+            go_to_step("1. Upload 5 Files")
+            st.rerun()
+        return
+    
+    bad_states_done = all(
+        9 in file_state.step_results
+        for file_state in workflow_state.files
+        if file_state.is_uploaded
+    )
+    dedupe_done = all(
+        8 in file_state.step_results
+        for file_state in workflow_state.files
+        if file_state.is_uploaded
+    )
+    if not dedupe_done:
+        st.warning("Please complete Step 8 (Cross-File Dedupe) first.")
+        if st.button("← Go to Step 8"):
+            go_to_step("8. Cross-File Dedupe")
+            st.rerun()
+        return
+    
+    mapping = workflow_state.column_mapping
+    # Resolve state column from first file
+    first_df = None
+    for f in workflow_state.files:
+        if f.cleaned_df is not None and len(f.cleaned_df) > 0:
+            first_df = f.cleaned_df
+            break
+    if first_df is None:
+        st.error("No file data found.")
+        return
+    
+    state_col = _resolve_state_column(first_df, mapping)
+    if state_col is None:
+        st.error("No State column found in the data. Add a column named State (or STATE) to use Bad States filtering.")
+        return
+    
+    st.write("Remove rows whose **State** value is in your Bad States list and/or in the always-removed list below (applied to **all 5 files**).")
+    
+    always_remove_az_de_tx = st.checkbox(
+        "Always remove AZ, DE, and TX",
+        value=True,
+        key="multi_always_remove_az_de_tx",
+        help="When enabled, rows with State = AZ, DE, or TX are always removed."
+    )
+    if always_remove_az_de_tx:
+        st.info("Currently **always removing** these three states: **AZ**, **DE**, and **TX**. You can turn this off with the checkbox above if you want to keep them.")
+    
+    bad_states_file = st.file_uploader(
+        "Upload Bad States file (optional — CSV, TXT, or Excel with one state code per row or one column)",
+        type=['csv', 'txt', 'xlsx', 'xls'],
+        key='multi_bad_states_upload'
+    )
+    bad_states_from_file = _load_bad_states_from_file(bad_states_file)
+    if bad_states_from_file:
+        st.caption(f"States from file ({len(bad_states_from_file)}): {', '.join(sorted(bad_states_from_file))}")
+    
+    bad_states = set(bad_states_from_file)
+    if always_remove_az_de_tx:
+        bad_states |= {'AZ', 'DE', 'TX'}
+    
+    if bad_states_done:
+        st.success("✅ Bad states removal complete for all 5 files!")
+        summary_data = []
+        for i, file_state in enumerate(workflow_state.files):
+            sr = file_state.step_results.get(9)
+            if sr:
+                summary_data.append({
+                    "File": f"File {i + 1}",
+                    "Filename": file_state.filename or "—",
+                    "Before": f"{sr.before_count:,}",
+                    "Removed": f"{sr.before_count - sr.after_count:,}",
+                    "After": f"{sr.after_count:,}"
+                })
+        if summary_data:
+            st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
+        st.divider()
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("← Back to Step 8", use_container_width=True):
+                go_to_step("8. Cross-File Dedupe")
+                st.rerun()
+        with col2:
+            if st.button("Next → Final Download", type="primary", use_container_width=True):
+                go_to_step("Final Download")
+                st.rerun()
+        return
+    
+    if not bad_states:
+        st.warning("Add states to remove: upload a Bad States file and/or leave \"Always remove AZ, DE, and TX\" checked.")
+        if st.button("← Back to Step 8"):
+            go_to_step("8. Cross-File Dedupe")
+            st.rerun()
+        return
+    
+    if st.button("Remove bad states from all files", type="primary"):
+        progress = st.progress(0)
+        status = st.empty()
+        for i, file_state in enumerate(workflow_state.files):
+            if not file_state.is_uploaded or file_state.cleaned_df is None:
+                continue
+            status.write(f"Processing File {i + 1}...")
+            progress.progress((i + 1) / 5)
+            df = file_state.cleaned_df.copy()
+            before_count = len(df)
+            result = filter_by_bad_states(df, state_col, bad_states)
+            file_state.cleaned_df = result.cleaned_df
+            removed_df = result.removed_df
+            if result.removed_count > 0:
+                removed_df = removed_df.copy()
+                removed_df['_removal_reason'] = 'bad_states'
+            file_state.step_results[9] = StepResult(
+                cleaned_df=result.cleaned_df,
+                all_removed_df=removed_df,
+                before_count=before_count,
+                after_count=len(result.cleaned_df),
+                removal_summary={"Bad states": result.removed_count}
+            )
+        progress.empty()
+        status.empty()
+        st.rerun()
+    
+    st.divider()
+    if st.button("← Back to Step 8", use_container_width=True):
+        go_to_step("8. Cross-File Dedupe")
+        st.rerun()
+
+
 def render_multi_step3_dnc():
     """Step 3: TCPA DNC File filtering for all 5 files in multi-file workflow.
     
@@ -1166,7 +1311,7 @@ def render_multi_step3_dnc():
             st.rerun()
         return
     
-    # Check if Step 2 cleaning has been done
+    # Check if Step 2 (Clean Bad Data) has been done
     cleaning_done = all(
         2 in file_state.step_results 
         for file_state in workflow_state.files 
@@ -1358,7 +1503,7 @@ def render_multi_step3_dnc():
             after_count = len(file_state.cleaned_df) if file_state.cleaned_df is not None else 0
             file_after_counts.append(after_count)
             
-            # Create StepResult for this file (Requirement 3.3)
+            # Create StepResult for this file (step 3 = DNC)
             file_state.step_results[3] = StepResult(
                 cleaned_df=file_state.cleaned_df,
                 all_removed_df=file_state.removed_df if file_state.removed_df is not None else pd.DataFrame(),
@@ -1476,7 +1621,7 @@ def render_multi_step4_zipcode():
     Uploads the TCPA Zip Codes file and filters all 5 files against:
     - Zip codes matching the TCPA zip code list
     
-    Reuses existing zip code logic from render_step4_zipcode() and applies to all 5 files.
+    Reuses existing zip code logic and applies to all 5 files.
     Displays per-file removal stats in a summary table.
     
     Requirements: 3.1, 3.2, 3.3, 3.4
@@ -1645,7 +1790,7 @@ def render_multi_step4_zipcode():
             after_count = len(file_state.cleaned_df) if file_state.cleaned_df is not None else 0
             file_after_counts.append(after_count)
             
-            # Create StepResult for this file (Requirement 3.3)
+            # Create StepResult for this file (step 4 = Zip)
             file_state.step_results[4] = StepResult(
                 cleaned_df=file_state.cleaned_df,
                 all_removed_df=file_state.removed_df if file_state.removed_df is not None else pd.DataFrame(),
@@ -1944,12 +2089,12 @@ def render_multi_step5_phones():
                 if result.removal_summary:
                     file_removal_summaries[i]['Duplicate phone'] = result.removal_summary.get('duplicate_phone', 0)
         
-        # Store after counts and create StepResults for each file
+        # Store after counts and create StepResults for each file (step 5 = Phone)
         for i, file_state in enumerate(workflow_state.files):
             after_count = len(file_state.cleaned_df) if file_state.cleaned_df is not None else 0
             file_after_counts.append(after_count)
             
-            # Create StepResult for this file (Requirement 3.3)
+            # Create StepResult for this file
             file_state.step_results[5] = StepResult(
                 cleaned_df=file_state.cleaned_df,
                 all_removed_df=file_state.removed_df if file_state.removed_df is not None else pd.DataFrame(),
@@ -2387,7 +2532,7 @@ def render_multi_step7_master_suppression():
                 file_removal_summaries[i]['master_phone_match'] = 0
                 file_after_counts.append(before_count)
         
-        # Create StepResults for each file (Requirement 5.6)
+        # Create StepResults for each file (step 7 = Master)
         for i, file_state in enumerate(workflow_state.files):
             after_count = len(file_state.cleaned_df) if file_state.cleaned_df is not None else 0
             
@@ -2529,7 +2674,7 @@ def render_multi_step8_crossfile_dedupe():
             st.rerun()
         return
     
-    # Check if Step 7 master suppression has been done
+    # Check if Step 7 (Master) suppression has been done
     suppression_done = all(
         7 in file_state.step_results 
         for file_state in workflow_state.files 
@@ -2738,7 +2883,7 @@ def render_multi_step8_crossfile_dedupe():
             file_removal_summaries[4]['crossfile_dedupe'] = 0
             file_after_counts.append(0)
         
-        # Create StepResults for each file (Requirement 6.8)
+        # Create StepResults for each file (step 8 = Cross-File Dedupe)
         for i, file_state in enumerate(workflow_state.files):
             after_count = len(file_state.cleaned_df) if file_state.cleaned_df is not None else 0
             
@@ -2851,12 +2996,12 @@ def render_multi_step8_crossfile_dedupe():
     with col2:
         # Next button - only enabled when deduplication is done
         if st.button(
-            "Next → Final Download",
+            "Next → Step 9: Bad States",
             type="primary",
             use_container_width=True,
             disabled=not dedupe_done
         ):
-            go_to_step("Final Download")
+            go_to_step("9. Bad States")
             st.rerun()
 
 
@@ -2874,17 +3019,17 @@ def render_multi_final_download():
             st.rerun()
         return
     
-    # Check if Step 8 cross-file deduplication has been done
-    dedupe_done = all(
-        8 in file_state.step_results 
+    # Check if Step 9 Bad States has been done
+    bad_states_done = all(
+        9 in file_state.step_results 
         for file_state in workflow_state.files 
         if file_state.is_uploaded
     )
     
-    if not dedupe_done:
-        st.warning("Please complete Step 8 (Cross-File Deduplication) first.")
-        if st.button("← Go to Step 8"):
-            go_to_step("8. Cross-File Dedupe")
+    if not bad_states_done:
+        st.warning("Please complete Step 9 (Bad States) first.")
+        if st.button("← Go to Step 9"):
+            go_to_step("9. Bad States")
             st.rerun()
         return
     
@@ -2896,31 +3041,44 @@ def render_multi_final_download():
     # Download All as ZIP section (Requirement 7.2, 7.4)
     st.subheader("📦 Download All Final Files as ZIP")
     
-    # Build the files dictionary for ZIP export (original name + " (CLEANED)")
+    # Build ZIP with final files at root and removed rows in removed_rows/ folder (with Reason column)
     def _final_zip_name(original_filename: str, file_num: int) -> str:
         if not original_filename or not original_filename.strip():
-            return f"File{file_num} (CLEANED).xlsx"
+            return f"File{file_num} - AZ DE TX removed (CLEANED).xlsx"
         base = original_filename.rsplit(".", 1)[0] if "." in original_filename else original_filename
-        return f"{base} (CLEANED).xlsx"
+        return f"{base} - AZ DE TX removed (CLEANED).xlsx"
 
-    zip_files = {}
-    for i, file_state in enumerate(workflow_state.files):
-        file_num = i + 1
-        orig = (file_state.filename or "").strip()
-        if file_state.cleaned_df is not None and len(file_state.cleaned_df) > 0:
-            zip_files[_final_zip_name(orig, file_num)] = file_state.cleaned_df
+    def _removed_zip_name(original_filename: str, file_num: int) -> str:
+        if not original_filename or not original_filename.strip():
+            return f"File{file_num} (REMOVED).xlsx"
+        base = original_filename.rsplit(".", 1)[0] if "." in original_filename else original_filename
+        return f"{base} (REMOVED).xlsx"
 
-    # Cache key for ZIP file
     cache_key_zip = "excel_cache_multi_final_zip"
-    
+    final_count = sum(1 for f in workflow_state.files if f.cleaned_df is not None and len(f.cleaned_df) > 0)
+    removed_count = sum(1 for f in workflow_state.files if f.removed_df is not None and len(f.removed_df) > 0)
+
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        if len(zip_files) > 0:
-            # Only generate ZIP if not cached
-            if cache_key_zip not in st.session_state:
-                with st.spinner("Preparing ZIP archive..."):
-                    st.session_state[cache_key_zip] = export_to_zip(zip_files)
-            
+        if cache_key_zip not in st.session_state:
+            with st.spinner("Preparing ZIP archive (final files + removed_rows folder)..."):
+                zip_buffer = BytesIO()
+                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                    mapping = workflow_state.column_mapping
+                    for i, file_state in enumerate(workflow_state.files):
+                        file_num = i + 1
+                        orig = (file_state.filename or "").strip()
+                        if file_state.cleaned_df is not None and len(file_state.cleaned_df) > 0:
+                            zf.writestr(_final_zip_name(orig, file_num), export_to_excel(file_state.cleaned_df))
+                        if file_state.removed_df is not None and len(file_state.removed_df) > 0:
+                            removed_bytes = export_removed_rows_to_excel(file_state.removed_df, mapping)
+                            zf.writestr(
+                                f"removed_rows/{_removed_zip_name(orig, file_num)}",
+                                removed_bytes,
+                            )
+                st.session_state[cache_key_zip] = zip_buffer.getvalue()
+
+        if final_count > 0:
             st.download_button(
                 label="📥 Download All as ZIP",
                 data=st.session_state[cache_key_zip],
@@ -2930,18 +3088,23 @@ def render_multi_final_download():
                 use_container_width=True,
                 key="download_final_zip"
             )
-            st.caption(f"Contains {len(zip_files)} final files")
+            parts = []
+            if final_count > 0:
+                parts.append(f"{final_count} final file(s)")
+            if removed_count > 0:
+                parts.append(f"removed_rows/ with {removed_count} file(s) (Reason column included)")
+            st.caption("Contains " + " and ".join(parts))
         else:
             st.warning("No files available for download.")
     
     st.divider()
     
-    # Navigation button - back to Step 8
+    # Navigation button - back to Step 9
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        if st.button("← Back to Step 8", use_container_width=True):
-            go_to_step("8. Cross-File Dedupe")
+        if st.button("← Back to Step 9", use_container_width=True):
+            go_to_step("9. Bad States")
             st.rerun()
     
     with col2:
@@ -3007,6 +3170,8 @@ def main():
             render_step5_phones()
         elif step == "6. Cross-File Dedupe":
             render_step6_crossfile_dedupe()
+        elif step == "7. Bad States":
+            render_step7_bad_states()
     
     elif workflow_mode == "multi":
         # Multi-file workflow (Requirement 1.4, 10.4)
@@ -3058,6 +3223,8 @@ def main():
             render_multi_step7_master_suppression()
         elif step == "8. Cross-File Dedupe":
             render_multi_step8_crossfile_dedupe()
+        elif step == "9. Bad States":
+            render_multi_step9_bad_states()
         elif step == "Final Download":
             render_multi_final_download()
 
@@ -3075,7 +3242,8 @@ def render_step1_upload():
     raw_file = st.file_uploader(
         "Upload Raw Data (Excel/CSV)",
         type=['xlsx', 'xls', 'csv'],
-        key='raw_upload'
+        key='raw_upload',
+        accept_multiple_files=False
     )
     
     # Only process file if it's new (not already loaded)
@@ -3375,8 +3543,135 @@ def render_step2_clean():
             st.rerun()
 
 
+def _resolve_state_column(df: pd.DataFrame, mapping: ColumnMapping) -> Optional[str]:
+    """Return the State column name from df, using mapping or common names."""
+    if mapping.state and mapping.state in df.columns:
+        return mapping.state
+    for name in ['State', 'STATE', 'StateCode', 'state', 'St']:
+        if name in df.columns:
+            return name
+    return None
+
+
+def _load_bad_states_from_file(uploaded_file) -> Set[str]:
+    """Load set of state codes from uploaded file (CSV, TXT, or Excel). One code per line or one column."""
+    states = set()
+    if uploaded_file is None:
+        return states
+    ext = get_file_extension(uploaded_file.name).lower()
+    try:
+        raw = uploaded_file.read()
+        if ext == '.csv':
+            df = pd.read_csv(BytesIO(raw))
+        elif ext in ['.xlsx', '.xls']:
+            df = pd.read_excel(BytesIO(raw))
+        else:
+            # .txt or other: read as lines
+            content = raw.decode('utf-8', errors='ignore')
+            for line in content.splitlines():
+                val = line.strip().upper()
+                if val and len(val) <= 3:
+                    states.add(val)
+            return states
+        # DataFrame: take first column, string values up to 3 chars
+        if df is not None and not df.empty:
+            col = df.iloc[:, 0].astype(str).str.strip().str.upper()
+            for v in col.dropna().unique():
+                if v and len(v) <= 3 and v not in ('NAN', 'NONE'):
+                    states.add(v)
+    except Exception:
+        pass
+    return states
+
+
+def render_step7_bad_states():
+    """Step 7: Bad States — remove rows where STATE is in uploaded list and optionally AZ, DE, TX."""
+    st.header("Step 7: Bad States")
+    
+    if st.session_state.step4_result is None:
+        st.warning("Please complete Step 6 (Cross-File Dedupe) first.")
+        return
+    
+    mapping = st.session_state.column_mapping
+    df = st.session_state.step4_result.cleaned_df.copy()
+    state_col = _resolve_state_column(df, mapping)
+    
+    if state_col is None:
+        st.error("No State column found in the data. Add a column named State (or STATE) to use Bad States filtering.")
+        return
+    
+    st.write("Remove rows whose **State** value is in your Bad States list and/or in the always-removed list below.")
+    
+    always_remove_az_de_tx = st.checkbox(
+        "Always remove AZ, DE, and TX",
+        value=True,
+        help="When enabled, rows with State = AZ, DE, or TX are always removed, in addition to any states from your uploaded file."
+    )
+    if always_remove_az_de_tx:
+        st.info("Currently **always removing** these three states: **AZ**, **DE**, and **TX**. You can turn this off with the checkbox above if you want to keep them.")
+    
+    bad_states_file = st.file_uploader(
+        "Upload Bad States file (optional — CSV, TXT, or Excel with one state code per row or one column)",
+        type=['csv', 'txt', 'xlsx', 'xls'],
+        key='bad_states_upload'
+    )
+    
+    bad_states_from_file = _load_bad_states_from_file(bad_states_file)
+    if bad_states_from_file:
+        st.caption(f"States from file ({len(bad_states_from_file)}): {', '.join(sorted(bad_states_from_file))}")
+    
+    bad_states = set(bad_states_from_file)
+    if always_remove_az_de_tx:
+        bad_states |= {'AZ', 'DE', 'TX'}
+    
+    if st.session_state.step1b_result is not None:
+        result = st.session_state.step1b_result
+        st.divider()
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Before", result.before_count)
+        col2.metric("Removed", result.before_count - result.after_count)
+        col3.metric("After", result.after_count)
+        st.subheader("Removal Summary")
+        for reason, count in result.removal_summary.items():
+            st.write(f"- {reason}: {count} rows")
+        st.dataframe(result.cleaned_df.head(25))
+        st.divider()
+        st.success("🎉 All steps complete! Your data has been fully cleaned.")
+        return
+    
+    if not bad_states:
+        st.warning("Add states to remove: upload a Bad States file and/or leave \"Always remove AZ, DE, and TX\" checked.")
+        if st.button("← Back to Step 6"):
+            go_to_step("6. Cross-File Dedupe")
+            st.rerun()
+        return
+    
+    if st.button("Remove bad states", type="primary"):
+        before_count = len(df)
+        result = filter_by_bad_states(df, state_col, bad_states)
+        df = result.cleaned_df
+        removal_summary = {"Bad states": result.removed_count}
+        removed_df = result.removed_df
+        if result.removed_count > 0:
+            removed_df = removed_df.copy()
+            removed_df['_removal_reason'] = 'bad_states'
+        st.session_state.step1b_result = StepResult(
+            cleaned_df=df,
+            all_removed_df=removed_df,
+            before_count=before_count,
+            after_count=len(df),
+            removal_summary=removal_summary
+        )
+        st.rerun()
+    
+    st.divider()
+    if st.button("← Back to Step 6", use_container_width=True):
+        go_to_step("6. Cross-File Dedupe")
+        st.rerun()
+
+
 def render_step3_dnc():
-    """Step 3: Upload TCPA DNC file and run against Step 2 data."""
+    """Step 3: Upload TCPA DNC file and run against Step 2 (Clean Bad Data) data."""
     st.header("Step 3: TCPA DNC File")
     
     if st.session_state.step1_result is None:
@@ -3393,6 +3688,8 @@ def render_step3_dnc():
         type=['xlsx', 'xls'],
         key='dnc_upload'
     )
+    
+    input_result = st.session_state.step1_result
     
     # Only process file if newly uploaded (not already loaded)
     if dnc_file and st.session_state.tcpa_ld_dnc_data is None:
@@ -3443,15 +3740,15 @@ def render_step3_dnc():
         st.write(f"- {len(dnc_names)} names")
     
     # Show current data count
-    if st.session_state.step1_result:
+    if input_result:
         st.divider()
-        st.write(f"**Input rows from Step 2:** {len(st.session_state.step1_result.cleaned_df)}")
+        st.write(f"**Input rows from Step 2 (Clean Bad Data):** {len(input_result.cleaned_df)}")
     
     # Run DNC button
-    if st.session_state.tcpa_ld_dnc_data is not None and st.session_state.step1_result is not None:
+    if st.session_state.tcpa_ld_dnc_data is not None and input_result is not None:
         if st.button("Run DNC against Step 2 data file", type="primary"):
             mapping = st.session_state.column_mapping
-            df = st.session_state.step1_result.cleaned_df.copy()
+            df = input_result.cleaned_df.copy()
             before_count = len(df)
             
             # Progress display
@@ -3580,7 +3877,7 @@ def render_step4_zipcode():
     # Show current data count
     if st.session_state.step2_result:
         st.divider()
-        st.write(f"**Input rows from Step 3:** {len(st.session_state.step2_result.cleaned_df)}")
+        st.write(f"**Input rows from Step 3 (TCPA DNC):** {len(st.session_state.step2_result.cleaned_df)}")
     
     # Run zip filter button
     if st.session_state.tcpa_zips_data is not None and st.session_state.step2_result is not None:
@@ -3685,7 +3982,7 @@ def render_step5_phones():
     # Show current data count
     if st.session_state.step3_result:
         st.divider()
-        st.write(f"**Input rows from Step 4:** {len(st.session_state.step3_result.cleaned_df)}")
+        st.write(f"**Input rows from Step 4 (Zip Code):** {len(st.session_state.step3_result.cleaned_df)}")
     
     # Run phone filter button
     if st.session_state.tcpa_phones_data is not None and st.session_state.step3_result is not None:
@@ -3798,7 +4095,7 @@ def render_step5_phones():
         
         st.success("🎉 Data cleansing complete! Download your final results above.")
         
-        # Next button to Step 6
+        # Next button to Step 7
         st.divider()
         if st.button("Next → Step 6: Cross-File Dedupe", type="primary"):
             go_to_step("6. Cross-File Dedupe")
@@ -4210,6 +4507,11 @@ def render_step6_crossfile_dedupe():
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="download_file5"
                 )
+            
+            st.divider()
+            if st.button("Next → Step 7: Bad States", type="primary"):
+                go_to_step("7. Bad States")
+                st.rerun()
 
 
 

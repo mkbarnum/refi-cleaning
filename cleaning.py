@@ -62,27 +62,36 @@ def filter_to_required_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str
 
 
 def normalize_phone(phone: Optional[Union[str, float, int]]) -> str:
-    """Normalize phone to digits only.
+    """Normalize phone to digits only (10 digits for US numbers).
+    
+    Handles int, float, scientific notation, and string decimals (e.g. "8314250574.0")
+    so that TCPA list matching works regardless of how Excel/pandas stored the value.
     
     Args:
         phone: Phone number in any format (string, float, int)
         
     Returns:
-        String containing only digits
+        String containing only digits (10 digits; strips leading 1 if 11 digits)
     """
     if phone is None or (isinstance(phone, float) and pd.isna(phone)):
         return ''
     
-    # Convert to string and extract digits only
-    phone_str = str(phone)
-    # Handle scientific notation (e.g., 4.056133e+09)
-    if 'e' in phone_str.lower() or isinstance(phone, float):
-        try:
+    phone_str = str(phone).strip()
+    # Handle numeric forms: float, int, scientific notation, or string decimal (e.g. "8314250574.0")
+    try:
+        if isinstance(phone, (int, float)) and not (isinstance(phone, float) and pd.isna(phone)):
+            phone_str = str(int(phone))
+        elif 'e' in phone_str.lower() or ('.' in phone_str and phone_str.replace('.', '', 1).replace('-', '', 1).isdigit()):
+            # Scientific notation or string decimal like "8314250574.0"
             phone_str = str(int(float(phone)))
-        except (ValueError, OverflowError):
-            pass
-    
-    return re.sub(r'\D', '', phone_str)
+    except (ValueError, OverflowError, TypeError):
+        pass
+
+    digits = re.sub(r'\D', '', phone_str)
+    # US: if 11 digits and starts with 1, use last 10
+    if len(digits) == 11 and digits.startswith('1'):
+        digits = digits[1:]
+    return digits
 
 
 
@@ -647,6 +656,40 @@ def filter_invalid_uuid(df: pd.DataFrame, uuid_col: str) -> CleanResult:
         reason="invalid_uuid"
     )
 
+
+def filter_by_bad_states(df: pd.DataFrame, state_col: str, bad_states: Set[str]) -> CleanResult:
+    """Remove rows where the state column value is in the bad_states set.
+    
+    State values are compared case-insensitively (normalized to uppercase).
+    
+    Args:
+        df: DataFrame to filter
+        state_col: Name of the State column
+        bad_states: Set of state codes to remove (e.g. {'AZ', 'DE', 'TX'})
+        
+    Returns:
+        CleanResult with cleaned and removed DataFrames
+    """
+    if not bad_states or state_col not in df.columns:
+        return CleanResult(
+            cleaned_df=df.copy(),
+            removed_df=pd.DataFrame(columns=df.columns),
+            removed_count=0,
+            reason="bad_states"
+        )
+    bad_upper = {str(s).strip().upper() for s in bad_states if s is not None and str(s).strip()}
+    state_upper = df[state_col].astype(str).str.strip().str.upper()
+    keep_mask = ~state_upper.isin(bad_upper)
+    # Also keep rows where state is missing/NaN (don't remove on empty state)
+    keep_mask = keep_mask | state_upper.isin(['', 'NAN', 'NONE'])
+    cleaned_df = df[keep_mask].copy()
+    removed_df = df[~keep_mask].copy()
+    return CleanResult(
+        cleaned_df=cleaned_df,
+        removed_df=removed_df,
+        removed_count=len(removed_df),
+        reason="bad_states"
+    )
 
 
 def dedupe_against_files(target_df: pd.DataFrame, reference_dfs: List[pd.DataFrame], phone_col: str) -> CleanResult:
