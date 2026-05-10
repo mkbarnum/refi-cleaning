@@ -1352,6 +1352,32 @@ def render_multi_step10_billing():
             col2.metric("Removed", f"{sr.before_count - sr.after_count:,}")
             col3.metric("File 1 After", f"{sr.after_count:,}")
         st.info("Files 2-5 were not modified in this step.")
+        
+        # Download section: File 1 all removed rows (all steps combined)
+        st.divider()
+        st.subheader("📥 File 1 — All Removed Rows (All Steps)")
+        st.write("Download all rows removed from File 1 across every step, with Step and Reason columns.")
+        
+        cache_key_f1_all_removed = "excel_cache_multi_step10_f1_all_removed"
+        file1_state = workflow_state.files[0]
+        
+        if file1_state.removed_df is not None and len(file1_state.removed_df) > 0:
+            if cache_key_f1_all_removed not in st.session_state:
+                with st.spinner("Preparing removed rows file..."):
+                    st.session_state[cache_key_f1_all_removed] = export_removed_rows_to_excel(
+                        file1_state.removed_df, mapping
+                    )
+            st.download_button(
+                label="📥 Download File 1 All Removed Rows",
+                data=st.session_state[cache_key_f1_all_removed],
+                file_name="file1_all_removed_rows.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_multi_f1_all_removed"
+            )
+            st.caption(f"Contains {len(file1_state.removed_df):,} removed rows with Step and Reason columns.")
+        else:
+            st.write("No rows were removed from File 1.")
+        
         st.divider()
         col1, col2 = st.columns([1, 1])
         with col1:
@@ -3899,10 +3925,11 @@ def render_step8_billing():
         st.divider()
         st.success("🎉 All steps complete! Your data has been fully cleaned.")
         
-        # Download section
-        cache_key_cleaned = "excel_cache_billing_cleaned"
-        cache_key_removed = "excel_cache_billing_removed"
+        # --- Final Download Section ---
+        st.subheader("📥 Final Downloads")
         
+        # Download cleaned file
+        cache_key_cleaned = "excel_cache_billing_cleaned"
         col1, col2 = st.columns(2)
         with col1:
             st.write("**Final Cleaned Data**")
@@ -3916,19 +3943,50 @@ def render_step8_billing():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="download_billing_cleaned"
             )
+        
+        # --- Combined Removed Rows (ALL steps) ---
         with col2:
-            if len(result.all_removed_df) > 0:
-                st.write("**Removed Rows (Billing)**")
-                if cache_key_removed not in st.session_state:
-                    with st.spinner("Preparing Excel file..."):
-                        st.session_state[cache_key_removed] = export_removed_rows_to_excel(result.all_removed_df, mapping)
+            st.write("**All Removed Rows (Steps 2-8)**")
+            cache_key_all_removed = "excel_cache_all_removed_combined"
+            if cache_key_all_removed not in st.session_state:
+                with st.spinner("Preparing combined removed rows..."):
+                    all_removed_parts = []
+                    # Step 2: Clean Bad Data
+                    if st.session_state.step1_result and len(st.session_state.step1_result.all_removed_df) > 0:
+                        all_removed_parts.append(st.session_state.step1_result.all_removed_df)
+                    # Step 3: TCPA DNC
+                    if st.session_state.step2_result and len(st.session_state.step2_result.all_removed_df) > 0:
+                        all_removed_parts.append(st.session_state.step2_result.all_removed_df)
+                    # Step 4: Zip Code
+                    if st.session_state.step3_result and len(st.session_state.step3_result.all_removed_df) > 0:
+                        all_removed_parts.append(st.session_state.step3_result.all_removed_df)
+                    # Step 5: Phone Number
+                    if st.session_state.step4_result and len(st.session_state.step4_result.all_removed_df) > 0:
+                        all_removed_parts.append(st.session_state.step4_result.all_removed_df)
+                    # Step 7: Bad States
+                    if st.session_state.step1b_result and len(st.session_state.step1b_result.all_removed_df) > 0:
+                        all_removed_parts.append(st.session_state.step1b_result.all_removed_df)
+                    # Step 8: Billing
+                    if result.all_removed_df is not None and len(result.all_removed_df) > 0:
+                        all_removed_parts.append(result.all_removed_df)
+                    
+                    if all_removed_parts:
+                        combined_removed = pd.concat(all_removed_parts, ignore_index=True)
+                        st.session_state[cache_key_all_removed] = export_removed_rows_to_excel(combined_removed, mapping)
+                    else:
+                        st.session_state[cache_key_all_removed] = None
+            
+            if st.session_state[cache_key_all_removed] is not None:
                 st.download_button(
-                    label="📥 Download Removed Rows",
-                    data=st.session_state[cache_key_removed],
-                    file_name="removed_billing.xlsx",
+                    label="📥 Download All Removed Rows",
+                    data=st.session_state[cache_key_all_removed],
+                    file_name="all_removed_rows.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="download_billing_removed"
+                    key="download_all_removed"
                 )
+                st.caption("Includes Step and Reason columns for every removed row across all steps.")
+            else:
+                st.write("No rows were removed.")
         return
     
     st.write("Upload **2 billing files** to deduplicate against your cleaned data. "

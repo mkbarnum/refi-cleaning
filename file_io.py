@@ -197,6 +197,34 @@ REASON_DESCRIPTIONS = {
     'duplicate_phone': 'Duplicate phone number',
     'invalid_uuid': 'Invalid UUID format',
     'billing_dedupe': 'Phone matches billing file',
+    'bad_states': 'State in bad states list',
+    'crossfile_dedupe': 'Duplicate phone (cross-file)',
+    'master_phone_match': 'Phone matches master suppression list',
+}
+
+# Mapping from reason codes to the step that removed the row
+# Uses generic step descriptions that work for both single-file and multi-file workflows
+REASON_TO_STEP = {
+    'highlighted_cells': 'Clean Bad Data',
+    'invalid_last_name': 'Clean Bad Data',
+    'empty_phone': 'Clean Bad Data',
+    'invalid_phone': 'Clean Bad Data',
+    'invalid_email': 'Clean Bad Data',
+    'contains_test': 'Clean Bad Data',
+    'placeholder_email': 'Clean Bad Data',
+    'fake_email': 'Clean Bad Data',
+    'prohibited_content': 'Clean Bad Data',
+    'invalid_uuid': 'Clean Bad Data',
+    'dnc_phone_match': 'TCPA DNC File',
+    'dnc_area_code': 'TCPA DNC File',
+    'dnc_name_match': 'TCPA DNC File',
+    'tcpa_zip_match': 'Zip Code Removal',
+    'tcpa_phone_match': 'Phone Number Removal',
+    'duplicate_phone': 'Phone Number Removal',
+    'crossfile_dedupe': 'Cross-File Dedupe',
+    'master_phone_match': 'Master Phone Suppression',
+    'bad_states': 'Bad States',
+    'billing_dedupe': 'Clean against Billing',
 }
 
 # Mapping from reason codes to the column that caused the issue
@@ -217,31 +245,40 @@ REASON_TO_COLUMN_FIELD = {
 
 
 def export_removed_rows_to_excel(df: pd.DataFrame, column_mapping) -> bytes:
-    """Export removed rows DataFrame to Excel with Reason column and yellow highlighting.
+    """Export removed rows DataFrame to Excel with Step, Reason columns and yellow highlighting.
     
     Args:
-        df: DataFrame with removed rows (must have '_removal_reason' and '_problem_column' columns)
+        df: DataFrame with removed rows (must have '_removal_reason' column, optionally '_removal_step' and '_problem_column')
         column_mapping: ColumnMapping object with mapped column names
         
     Returns:
-        Excel file as bytes with Reason column first and problem cells highlighted yellow
+        Excel file as bytes with Step and Reason columns first and problem cells highlighted yellow
     """
     if len(df) == 0:
         return export_to_excel(df)
     
-    # Create a copy and prepare the Reason column
+    # Create a copy and prepare the Step and Reason columns
     export_df = df.copy()
     
-    # Convert internal reason to human-readable
+    # Convert internal reason to human-readable and determine step
     if '_removal_reason' in export_df.columns:
         export_df['Reason'] = export_df['_removal_reason'].map(
             lambda x: REASON_DESCRIPTIONS.get(x, x)
         )
+        # Determine step from reason code (or use explicit _removal_step if present)
+        if '_removal_step' in export_df.columns:
+            export_df['Step'] = export_df['_removal_step']
+            export_df = export_df.drop(columns=['_removal_step'])
+        else:
+            export_df['Step'] = export_df['_removal_reason'].map(
+                lambda x: REASON_TO_STEP.get(x, 'Unknown')
+            )
         # Store original reason for highlighting logic
         original_reasons = export_df['_removal_reason'].tolist()
         export_df = export_df.drop(columns=['_removal_reason'])
     else:
         export_df['Reason'] = 'Unknown'
+        export_df['Step'] = 'Unknown'
         original_reasons = ['unknown'] * len(export_df)
     
     # Remove _problem_column if present
@@ -251,10 +288,11 @@ def export_removed_rows_to_excel(df: pd.DataFrame, column_mapping) -> bytes:
     else:
         problem_columns = [None] * len(export_df)
     
-    # Reorder columns to put Reason first
+    # Reorder columns to put Step and Reason first
     cols = export_df.columns.tolist()
+    cols.remove('Step')
     cols.remove('Reason')
-    export_df = export_df[['Reason'] + cols]
+    export_df = export_df[['Step', 'Reason'] + cols]
     
     # Build mapping from field names to actual column names
     field_to_col = {}
