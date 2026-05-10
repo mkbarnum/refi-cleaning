@@ -6,7 +6,7 @@ A Streamlit web application for cleaning and validating refinance lead data thro
 
 This tool processes raw refinance lead data files through a cleaning pipeline, removing invalid entries, matching against Do Not Call (DNC) lists, suppressing phone numbers, deduplicating across files, and filtering by state. The application supports two workflows:
 
-- **Single-File Workflow (Clean 1 File)** — An 8-step pipeline for processing one data file at a time
+- **Single-File Workflow (Clean 1 File)** — A 9-step pipeline for processing one data file at a time
 - **Multi-File Workflow (Clean 5 Files)** — A 10-step pipeline for processing 5 weekly files together with cross-file deduplication and master phone suppression
 
 ## Home Page
@@ -18,7 +18,7 @@ On launch, the app displays a home page with the company logo and two workflow o
 
 ---
 
-## Single-File Workflow (8 Steps)
+## Single-File Workflow (9 Steps)
 
 ### Step 1: Upload Raw Data
 - Upload Excel (.xlsx, .xls) or CSV files
@@ -53,9 +53,14 @@ On launch, the app displays a home page with the company logo and two workflow o
 - Provides aggregated removal summary across all steps
 - Download cleaned data and removed rows with highlighted problem cells
 
-### Step 6: Cross-File Deduplication
+### Step 6: Master Phone Suppression
+- Upload a master phone list Excel file (supports multiple tabs)
+- Extracts and normalizes phone numbers from ALL tabs
+- Filters the cleaned data against the master phone list
+
+### Step 7: Cross-File Deduplication
 - Deduplicate phone numbers across 5 weekly files
-- File 1 (newest, from Steps 1-5) keeps all rows as reference
+- File 1 (newest, from Steps 1-6) keeps all rows as reference
 - Upload 4 additional pre-cleaned files (Files 2-5)
 - Each older file has duplicates removed against all newer files:
   - File 5 (oldest): removes phones in Files 1-4
@@ -64,14 +69,14 @@ On launch, the app displays a home page with the company logo and two workflow o
   - File 2: removes phones in File 1
 - Download all 5 deduplicated files
 
-### Step 7: Bad States
+### Step 8: Bad States
 - Remove rows where the State column matches a configurable list of "bad" states (e.g., AZ, DE, TX)
 - Upload a custom bad-states list or use the default set
 
-### Step 8: Clean against Billing
+### Step 9: Clean against Billing
 - Upload 2 billing Excel files
 - Removes rows from the cleaned data where the phone number matches any phone in either billing file
-- Download final cleaned file
+- Download final cleaned file and combined removed rows (all steps) with Step and Reason columns
 
 ---
 

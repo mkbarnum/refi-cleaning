@@ -108,6 +108,15 @@ def init_session_state():
         st.session_state.file4_data = None
     if 'file5_data' not in st.session_state:
         st.session_state.file5_data = None
+    # Store filenames for display (avoid Streamlit widget truncation)
+    if 'file2_name' not in st.session_state:
+        st.session_state.file2_name = None
+    if 'file3_name' not in st.session_state:
+        st.session_state.file3_name = None
+    if 'file4_name' not in st.session_state:
+        st.session_state.file4_name = None
+    if 'file5_name' not in st.session_state:
+        st.session_state.file5_name = None
     if 'file2_deduped' not in st.session_state:
         st.session_state.file2_deduped = None
     if 'file3_deduped' not in st.session_state:
@@ -128,6 +137,9 @@ def init_session_state():
     # Step 8: Clean against Billing state (single-file workflow)
     if 'billing_result' not in st.session_state:
         st.session_state.billing_result = None
+    # Step 6: Master Phone Suppression state (single-file workflow)
+    if 'master_phone_result' not in st.session_state:
+        st.session_state.master_phone_result = None
 
 
 # Single-file workflow steps (existing behavior)
@@ -137,9 +149,10 @@ SINGLE_FILE_STEPS = [
     "3. TCPA DNC File",
     "4. Zip Code Removal",
     "5. Phone Number Removal",
-    "6. Cross-File Dedupe",
-    "7. Bad States",
-    "8. Clean against Billing"
+    "6. Master Phone Suppression",
+    "7. Cross-File Dedupe",
+    "8. Bad States",
+    "9. Clean against Billing"
 ]
 
 # Multi-file workflow steps (10-step workflow)
@@ -193,6 +206,10 @@ def clear_single_file_state():
     st.session_state.file3_data = None
     st.session_state.file4_data = None
     st.session_state.file5_data = None
+    st.session_state.file2_name = None
+    st.session_state.file3_name = None
+    st.session_state.file4_name = None
+    st.session_state.file5_name = None
     st.session_state.file2_deduped = None
     st.session_state.file3_deduped = None
     st.session_state.file4_deduped = None
@@ -204,6 +221,9 @@ def clear_single_file_state():
     
     # Clear billing state
     st.session_state.billing_result = None
+    
+    # Clear master phone suppression state
+    st.session_state.master_phone_result = None
     
     # Clear cleaning flags
     st.session_state.do_cleaning = False
@@ -3376,12 +3396,14 @@ def main():
             render_step4_zipcode()
         elif step == "5. Phone Number Removal":
             render_step5_phones()
-        elif step == "6. Cross-File Dedupe":
-            render_step6_crossfile_dedupe()
-        elif step == "7. Bad States":
-            render_step7_bad_states()
-        elif step == "8. Clean against Billing":
-            render_step8_billing()
+        elif step == "6. Master Phone Suppression":
+            render_step6_master_suppression()
+        elif step == "7. Cross-File Dedupe":
+            render_step7_crossfile_dedupe()
+        elif step == "8. Bad States":
+            render_step8_bad_states()
+        elif step == "9. Clean against Billing":
+            render_step9_billing()
     
     elif workflow_mode == "multi":
         # Multi-file workflow (Requirement 1.4, 10.4)
@@ -3796,12 +3818,15 @@ def _load_bad_states_from_file(uploaded_file) -> Set[str]:
     return states
 
 
-def render_step7_bad_states():
-    """Step 7: Bad States — remove rows where STATE is in uploaded list and optionally AZ, DE, TX."""
-    st.header("Step 7: Bad States")
+def render_step8_bad_states():
+    """Step 8: Bad States — remove rows where STATE is in uploaded list and optionally AZ, DE, TX."""
+    st.header("Step 8: Bad States")
     
     if st.session_state.step4_result is None:
-        st.warning("Please complete Step 6 (Cross-File Dedupe) first.")
+        st.warning("Please complete Step 7 (Cross-File Dedupe) first.")
+        if st.button("← Back to Step 7"):
+            go_to_step("7. Cross-File Dedupe")
+            st.rerun()
         return
     
     mapping = st.session_state.column_mapping
@@ -3850,19 +3875,19 @@ def render_step7_bad_states():
         st.divider()
         col1, col2 = st.columns([1, 1])
         with col1:
-            if st.button("← Back to Step 6", use_container_width=True):
-                go_to_step("6. Cross-File Dedupe")
+            if st.button("← Back to Step 7", use_container_width=True):
+                go_to_step("7. Cross-File Dedupe")
                 st.rerun()
         with col2:
-            if st.button("Next → Step 8: Clean against Billing", type="primary", use_container_width=True):
-                go_to_step("8. Clean against Billing")
+            if st.button("Next → Step 9: Clean against Billing", type="primary", use_container_width=True):
+                go_to_step("9. Clean against Billing")
                 st.rerun()
         return
     
     if not bad_states:
         st.warning("Add states to remove: upload a Bad States file and/or leave \"Always remove AZ, DE, and TX\" checked.")
-        if st.button("← Back to Step 6"):
-            go_to_step("6. Cross-File Dedupe")
+        if st.button("← Back to Step 7"):
+            go_to_step("7. Cross-File Dedupe")
             st.rerun()
         return
     
@@ -3885,24 +3910,24 @@ def render_step7_bad_states():
         st.rerun()
     
     st.divider()
-    if st.button("← Back to Step 6", use_container_width=True):
-        go_to_step("6. Cross-File Dedupe")
+    if st.button("← Back to Step 7", use_container_width=True):
+        go_to_step("7. Cross-File Dedupe")
         st.rerun()
 
 
-def render_step8_billing():
-    """Step 8: Clean against Billing — dedupe the cleaned file against 2 uploaded billing files.
+def render_step9_billing():
+    """Step 9: Clean against Billing — dedupe the cleaned file against 2 uploaded billing files.
     
     Uploads 2 billing Excel files and removes rows from the cleaned data where the phone number
     matches any phone in the billing files. Only the main file is modified.
     """
-    st.header("Step 8: Clean against Billing")
+    st.header("Step 9: Clean against Billing")
     
-    # Check prerequisite: Step 7 (Bad States) must be done
+    # Check prerequisite: Step 8 (Bad States) must be done
     if st.session_state.step1b_result is None:
-        st.warning("Please complete Step 7 (Bad States) first.")
-        if st.button("← Back to Step 7"):
-            go_to_step("7. Bad States")
+        st.warning("Please complete Step 8 (Bad States) first.")
+        if st.button("← Back to Step 8"):
+            go_to_step("8. Bad States")
             st.rerun()
         return
     
@@ -3960,13 +3985,22 @@ def render_step8_billing():
                     # Step 4: Zip Code
                     if st.session_state.step3_result and len(st.session_state.step3_result.all_removed_df) > 0:
                         all_removed_parts.append(st.session_state.step3_result.all_removed_df)
-                    # Step 5: Phone Number
+                    # Step 5: Phone Number (includes master phone removals via step4_result update)
                     if st.session_state.step4_result and len(st.session_state.step4_result.all_removed_df) > 0:
                         all_removed_parts.append(st.session_state.step4_result.all_removed_df)
-                    # Step 7: Bad States
+                    # Step 6: Master Phone Suppression (standalone result if not merged into step4)
+                    if st.session_state.master_phone_result and len(st.session_state.master_phone_result.all_removed_df) > 0:
+                        # Only add if not already included in step4_result
+                        # Check by seeing if master_phone_match reason is already in step4's removed
+                        step4_reasons = set()
+                        if st.session_state.step4_result and '_removal_reason' in st.session_state.step4_result.all_removed_df.columns:
+                            step4_reasons = set(st.session_state.step4_result.all_removed_df['_removal_reason'].unique())
+                        if 'master_phone_match' not in step4_reasons:
+                            all_removed_parts.append(st.session_state.master_phone_result.all_removed_df)
+                    # Step 8: Bad States
                     if st.session_state.step1b_result and len(st.session_state.step1b_result.all_removed_df) > 0:
                         all_removed_parts.append(st.session_state.step1b_result.all_removed_df)
-                    # Step 8: Billing
+                    # Step 9: Billing
                     if result.all_removed_df is not None and len(result.all_removed_df) > 0:
                         all_removed_parts.append(result.all_removed_df)
                     
@@ -4062,8 +4096,8 @@ def render_step8_billing():
             st.rerun()
     
     st.divider()
-    if st.button("← Back to Step 7", use_container_width=True):
-        go_to_step("7. Bad States")
+    if st.button("← Back to Step 8", use_container_width=True):
+        go_to_step("8. Bad States")
         st.rerun()
 
 
@@ -4492,19 +4526,139 @@ def render_step5_phones():
         
         st.success("🎉 Data cleansing complete! Download your final results above.")
         
-        # Next button to Step 7
+        # Next button to Step 6
         st.divider()
-        if st.button("Next → Step 6: Cross-File Dedupe", type="primary"):
-            go_to_step("6. Cross-File Dedupe")
+        if st.button("Next → Step 6: Master Phone Suppression", type="primary"):
+            go_to_step("6. Master Phone Suppression")
             st.rerun()
 
 
-def render_step6_crossfile_dedupe():
-    """Step 6: Cross-file deduplication across 5 weekly files."""
-    st.header("Step 6: Cross-File Deduplication")
+def render_step6_master_suppression():
+    """Step 6: Master Phone List Suppression for single-file workflow.
     
+    Uploads a master phone list Excel file with multiple tabs and filters the cleaned data
+    against the extracted phone numbers. Phone numbers are normalized to 10 digits.
+    """
+    st.header("Step 6: Master Phone Suppression")
+    
+    # Check prerequisite: Step 5 (Phone Number Removal) must be done
     if st.session_state.step4_result is None:
         st.warning("Please complete Step 5 (Phone Number Removal) first.")
+        if st.button("← Back to Step 5"):
+            go_to_step("5. Phone Number Removal")
+            st.rerun()
+        return
+    
+    mapping = st.session_state.column_mapping
+    phone_col = mapping.phone or 'Phone1'
+    
+    # Check if already done
+    if st.session_state.master_phone_result is not None:
+        result = st.session_state.master_phone_result
+        st.success("✅ Master phone suppression complete!")
+        st.divider()
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Before", f"{result.before_count:,}")
+        col2.metric("Removed", f"{result.before_count - result.after_count:,}")
+        col3.metric("After", f"{result.after_count:,}")
+        st.subheader("Removal Summary")
+        for reason, count in result.removal_summary.items():
+            st.write(f"- {reason}: {count} rows")
+        st.dataframe(result.cleaned_df.head(25))
+        st.divider()
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("← Back to Step 5", use_container_width=True):
+                go_to_step("5. Phone Number Removal")
+                st.rerun()
+        with col2:
+            if st.button("Next → Step 7: Cross-File Dedupe", type="primary", use_container_width=True):
+                go_to_step("7. Cross-File Dedupe")
+                st.rerun()
+        return
+    
+    st.write("Upload a **Master Phone List** Excel file (supports multiple tabs). "
+             "All phone numbers from every tab will be extracted and used to filter your data.")
+    st.info("Phone numbers are normalized to 10 digits. Numbers from all tabs are combined into one suppression set.")
+    
+    st.divider()
+    
+    # File uploader for master phone list
+    master_file = st.file_uploader(
+        "Upload Master Phone List (Excel with one or more tabs)",
+        type=['xlsx', 'xls'],
+        key='single_master_phone_upload'
+    )
+    
+    if master_file:
+        st.caption(f"✓ File: {master_file.name}")
+    
+    st.divider()
+    
+    if master_file is None:
+        st.warning("Please upload a master phone list file to proceed.")
+        if st.button("← Back to Step 5"):
+            go_to_step("5. Phone Number Removal")
+            st.rerun()
+        return
+    
+    if st.button("Apply Master Phone Suppression", type="primary"):
+        with st.spinner("Extracting phone numbers from all tabs..."):
+            master_file.seek(0)
+            master_phones = load_phones_from_all_tabs(BytesIO(master_file.read()))
+            st.write(f"📞 Extracted **{len(master_phones):,}** unique phone numbers from master list.")
+        
+        with st.spinner("Filtering data against master phone list..."):
+            # Get the current cleaned data from Step 5
+            df = st.session_state.step4_result.cleaned_df.copy()
+            before_count = len(df)
+            
+            # Filter using TCPA phone matching
+            result = filter_by_tcpa_phones(df, phone_col, master_phones)
+            
+            # Track removed rows
+            removed_df = result.removed_df
+            if result.removed_count > 0:
+                removed_df = removed_df.copy()
+                removed_df['_removal_reason'] = 'master_phone_match'
+            
+            # Store result — also update step4_result so downstream steps use the filtered data
+            st.session_state.master_phone_result = StepResult(
+                cleaned_df=result.cleaned_df,
+                all_removed_df=removed_df,
+                before_count=before_count,
+                after_count=len(result.cleaned_df),
+                removal_summary={"Master phone match": result.removed_count}
+            )
+            # Update step4_result's cleaned_df so cross-file dedupe and bad states use filtered data
+            st.session_state.step4_result = StepResult(
+                cleaned_df=result.cleaned_df,
+                all_removed_df=pd.concat(
+                    [st.session_state.step4_result.all_removed_df, removed_df],
+                    ignore_index=True
+                ) if result.removed_count > 0 else st.session_state.step4_result.all_removed_df,
+                before_count=st.session_state.step4_result.before_count,
+                after_count=len(result.cleaned_df),
+                removal_summary={**st.session_state.step4_result.removal_summary, "Master phone match": result.removed_count}
+            )
+            st.rerun()
+    
+    st.divider()
+    if st.button("← Back to Step 5", use_container_width=True):
+        go_to_step("5. Phone Number Removal")
+        st.rerun()
+
+
+def render_step7_crossfile_dedupe():
+    """Step 7: Cross-file deduplication across 5 weekly files."""
+    st.header("Step 7: Cross-File Deduplication")
+    
+    # Check prerequisite: need either step6 (master phone) result or step4 (phone) result
+    if st.session_state.master_phone_result is None and st.session_state.step4_result is None:
+        st.warning("Please complete Step 6 (Master Phone Suppression) first.")
+        if st.button("← Back to Step 6"):
+            go_to_step("6. Master Phone Suppression")
+            st.rerun()
         return
     
     st.write("Remove duplicate phone numbers across multiple weekly files.")
@@ -4528,97 +4682,131 @@ def render_step6_crossfile_dedupe():
     with col1:
         # File 2 uploader
         st.write("**File 2 (2nd Newest)**")
-        file2_upload = st.file_uploader(
-            "Upload File 2",
-            type=['xlsx', 'xls', 'csv'],
-            key='file2_upload',
-            label_visibility="collapsed"
-        )
-        if file2_upload and st.session_state.file2_data is None:
-            try:
-                file_bytes = file2_upload.read()
-                df = load_file_with_progress(file_bytes, file2_upload.name)
-                st.session_state.file2_data = df
-            except Exception as e:
-                st.error(f"Error loading File 2: {e}")
+        if st.session_state.file2_data is not None and st.session_state.file2_name:
+            st.success(f"✓ {st.session_state.file2_name}")
+            st.caption(f"{len(st.session_state.file2_data):,} rows")
+        else:
+            file2_upload = st.file_uploader(
+                "Upload File 2",
+                type=['xlsx', 'xls', 'csv'],
+                key='file2_upload',
+                label_visibility="collapsed"
+            )
+            if file2_upload and st.session_state.file2_data is None:
+                try:
+                    file_bytes = file2_upload.read()
+                    df = load_file_with_progress(file_bytes, file2_upload.name)
+                    st.session_state.file2_data = df
+                    st.session_state.file2_name = file2_upload.name
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error loading File 2: {e}")
         
         # File 3 uploader
         st.write("**File 3 (Middle)**")
-        file3_upload = st.file_uploader(
-            "Upload File 3",
-            type=['xlsx', 'xls', 'csv'],
-            key='file3_upload',
-            label_visibility="collapsed"
-        )
-        if file3_upload and st.session_state.file3_data is None:
-            try:
-                file_bytes = file3_upload.read()
-                df = load_file_with_progress(file_bytes, file3_upload.name)
-                st.session_state.file3_data = df
-            except Exception as e:
-                st.error(f"Error loading File 3: {e}")
+        if st.session_state.file3_data is not None and st.session_state.file3_name:
+            st.success(f"✓ {st.session_state.file3_name}")
+            st.caption(f"{len(st.session_state.file3_data):,} rows")
+        else:
+            file3_upload = st.file_uploader(
+                "Upload File 3",
+                type=['xlsx', 'xls', 'csv'],
+                key='file3_upload',
+                label_visibility="collapsed"
+            )
+            if file3_upload and st.session_state.file3_data is None:
+                try:
+                    file_bytes = file3_upload.read()
+                    df = load_file_with_progress(file_bytes, file3_upload.name)
+                    st.session_state.file3_data = df
+                    st.session_state.file3_name = file3_upload.name
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error loading File 3: {e}")
     
     with col2:
         # File 4 uploader
         st.write("**File 4 (2nd Oldest)**")
-        file4_upload = st.file_uploader(
-            "Upload File 4",
-            type=['xlsx', 'xls', 'csv'],
-            key='file4_upload',
-            label_visibility="collapsed"
-        )
-        if file4_upload and st.session_state.file4_data is None:
-            try:
-                file_bytes = file4_upload.read()
-                df = load_file_with_progress(file_bytes, file4_upload.name)
-                st.session_state.file4_data = df
-            except Exception as e:
-                st.error(f"Error loading File 4: {e}")
+        if st.session_state.file4_data is not None and st.session_state.file4_name:
+            st.success(f"✓ {st.session_state.file4_name}")
+            st.caption(f"{len(st.session_state.file4_data):,} rows")
+        else:
+            file4_upload = st.file_uploader(
+                "Upload File 4",
+                type=['xlsx', 'xls', 'csv'],
+                key='file4_upload',
+                label_visibility="collapsed"
+            )
+            if file4_upload and st.session_state.file4_data is None:
+                try:
+                    file_bytes = file4_upload.read()
+                    df = load_file_with_progress(file_bytes, file4_upload.name)
+                    st.session_state.file4_data = df
+                    st.session_state.file4_name = file4_upload.name
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error loading File 4: {e}")
         
         # File 5 uploader
         st.write("**File 5 (Oldest)**")
-        file5_upload = st.file_uploader(
-            "Upload File 5",
-            type=['xlsx', 'xls', 'csv'],
-            key='file5_upload',
-            label_visibility="collapsed"
-        )
-        if file5_upload and st.session_state.file5_data is None:
-            try:
-                file_bytes = file5_upload.read()
-                df = load_file_with_progress(file_bytes, file5_upload.name)
-                st.session_state.file5_data = df
-            except Exception as e:
-                st.error(f"Error loading File 5: {e}")
+        if st.session_state.file5_data is not None and st.session_state.file5_name:
+            st.success(f"✓ {st.session_state.file5_name}")
+            st.caption(f"{len(st.session_state.file5_data):,} rows")
+        else:
+            file5_upload = st.file_uploader(
+                "Upload File 5",
+                type=['xlsx', 'xls', 'csv'],
+                key='file5_upload',
+                label_visibility="collapsed"
+            )
+            if file5_upload and st.session_state.file5_data is None:
+                try:
+                    file_bytes = file5_upload.read()
+                    df = load_file_with_progress(file_bytes, file5_upload.name)
+                    st.session_state.file5_data = df
+                    st.session_state.file5_name = file5_upload.name
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error loading File 5: {e}")
     
     st.divider()
     
     # --- Display row counts for all 5 files (Requirements 5.3) ---
     st.subheader("📊 File Summary")
     
-    # Build file info list
-    files_info = [
-        ("File 1 (Newest)", file1_df, "From Steps 1-5"),
-        ("File 2", st.session_state.file2_data, "Pre-cleaned"),
-        ("File 3", st.session_state.file3_data, "Pre-cleaned"),
-        ("File 4", st.session_state.file4_data, "Pre-cleaned"),
-        ("File 5 (Oldest)", st.session_state.file5_data, "Pre-cleaned"),
-    ]
-    
-    # Display in columns
-    cols = st.columns(5)
+    # Build summary table data showing full filenames
+    summary_data = []
     all_files_loaded = True
     
-    for i, (name, df, source) in enumerate(files_info):
-        with cols[i]:
-            if df is not None:
-                st.metric(name, f"{len(df):,}")
-                st.caption(source)
-            else:
-                st.metric(name, "—")
-                st.caption("Not loaded")
-                if i > 0:  # File 1 is always loaded
-                    all_files_loaded = False
+    file_names_list = [
+        ("File 1 (Newest)", file1_df, "From Steps 1-5"),
+        ("File 2 (2nd Newest)", st.session_state.file2_data, st.session_state.file2_name),
+        ("File 3 (Middle)", st.session_state.file3_data, st.session_state.file3_name),
+        ("File 4 (2nd Oldest)", st.session_state.file4_data, st.session_state.file4_name),
+        ("File 5 (Oldest)", st.session_state.file5_data, st.session_state.file5_name),
+    ]
+    
+    for i, (label, df, fname) in enumerate(file_names_list):
+        if df is not None:
+            summary_data.append({
+                "File": label,
+                "Status": "✓ Loaded",
+                "Filename": fname or "—",
+                "Rows": f"{len(df):,}"
+            })
+        else:
+            summary_data.append({
+                "File": label,
+                "Status": "⏳ Pending",
+                "Filename": "—",
+                "Rows": "—"
+            })
+            if i > 0:
+                all_files_loaded = False
+    
+    # Display as a full-width table (no truncation)
+    summary_df = pd.DataFrame(summary_data)
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
     
     # Show status message
     if all_files_loaded:
@@ -4906,8 +5094,8 @@ def render_step6_crossfile_dedupe():
                 )
             
             st.divider()
-            if st.button("Next → Step 7: Bad States", type="primary"):
-                go_to_step("7. Bad States")
+            if st.button("Next → Step 8: Bad States", type="primary"):
+                go_to_step("8. Bad States")
                 st.rerun()
 
 
