@@ -125,6 +125,9 @@ def init_session_state():
         st.session_state.file4_dedupe_counts = None
     if 'file5_dedupe_counts' not in st.session_state:
         st.session_state.file5_dedupe_counts = None
+    # Step 8: Clean against Billing state (single-file workflow)
+    if 'billing_result' not in st.session_state:
+        st.session_state.billing_result = None
 
 
 # Single-file workflow steps (existing behavior)
@@ -135,10 +138,11 @@ SINGLE_FILE_STEPS = [
     "4. Zip Code Removal",
     "5. Phone Number Removal",
     "6. Cross-File Dedupe",
-    "7. Bad States"
+    "7. Bad States",
+    "8. Clean against Billing"
 ]
 
-# Multi-file workflow steps (9-step workflow)
+# Multi-file workflow steps (10-step workflow)
 MULTI_FILE_STEPS = [
     "Home",
     "1. Upload 5 Files",
@@ -150,6 +154,7 @@ MULTI_FILE_STEPS = [
     "7. Master Phone Suppression",
     "8. Cross-File Dedupe",
     "9. Bad States",
+    "10. Clean against Billing",
     "Final Download"
 ]
 
@@ -196,6 +201,9 @@ def clear_single_file_state():
     st.session_state.file3_dedupe_counts = None
     st.session_state.file4_dedupe_counts = None
     st.session_state.file5_dedupe_counts = None
+    
+    # Clear billing state
+    st.session_state.billing_result = None
     
     # Clear cleaning flags
     st.session_state.do_cleaning = False
@@ -489,6 +497,16 @@ def validate_multi_file_state_for_step(required_step: int) -> tuple[bool, str]:
         )
         if not dedupe_done:
             return False, "8. Cross-File Dedupe"
+    
+    if required_step >= 10:
+        # Step 10 (Clean against Billing) requires Step 9 (Bad States) to be complete
+        bad_states_done = all(
+            9 in file_state.step_results 
+            for file_state in workflow_state.files 
+            if file_state.is_uploaded
+        )
+        if not bad_states_done:
+            return False, "9. Bad States"
     
     return True, ""
 
@@ -1241,8 +1259,8 @@ def render_multi_step9_bad_states():
                 go_to_step("8. Cross-File Dedupe")
                 st.rerun()
         with col2:
-            if st.button("Next → Final Download", type="primary", use_container_width=True):
-                go_to_step("Final Download")
+            if st.button("Next → Step 10: Clean against Billing", type="primary", use_container_width=True):
+                go_to_step("10. Clean against Billing")
                 st.rerun()
         return
     
@@ -1284,6 +1302,170 @@ def render_multi_step9_bad_states():
     if st.button("← Back to Step 8", use_container_width=True):
         go_to_step("8. Cross-File Dedupe")
         st.rerun()
+
+
+def render_multi_step10_billing():
+    """Step 10: Clean against Billing — dedupe File 1 (newest) against 2 uploaded billing files.
+    
+    Uploads 2 billing Excel files and removes rows from File 1 where the phone number
+    matches any phone in the billing files. Only File 1 is modified; Files 2-5 are unchanged.
+    """
+    st.header("Step 10: Clean against Billing (Multi-File)")
+    
+    workflow_state = st.session_state.multi_file_state
+    if workflow_state is None:
+        st.warning("Please complete Step 1 (Upload 5 Files) first.")
+        if st.button("← Go to Step 1"):
+            go_to_step("1. Upload 5 Files")
+            st.rerun()
+        return
+    
+    # Check prerequisite: Step 9 must be done
+    bad_states_done = all(
+        9 in file_state.step_results
+        for file_state in workflow_state.files
+        if file_state.is_uploaded
+    )
+    if not bad_states_done:
+        st.warning("Please complete Step 9 (Bad States) first.")
+        if st.button("← Go to Step 9"):
+            go_to_step("9. Bad States")
+            st.rerun()
+        return
+    
+    mapping = workflow_state.column_mapping
+    phone_col = mapping.phone or 'Phone1'
+    
+    # Check if step 10 is already done
+    billing_done = all(
+        10 in file_state.step_results
+        for file_state in workflow_state.files
+        if file_state.is_uploaded
+    )
+    
+    if billing_done:
+        st.success("✅ Billing deduplication complete!")
+        sr = workflow_state.files[0].step_results.get(10)
+        if sr:
+            col1, col2, col3 = st.columns(3)
+            col1.metric("File 1 Before", f"{sr.before_count:,}")
+            col2.metric("Removed", f"{sr.before_count - sr.after_count:,}")
+            col3.metric("File 1 After", f"{sr.after_count:,}")
+        st.info("Files 2-5 were not modified in this step.")
+        st.divider()
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("← Back to Step 9", use_container_width=True):
+                go_to_step("9. Bad States")
+                st.rerun()
+        with col2:
+            if st.button("Next → Final Download", type="primary", use_container_width=True):
+                go_to_step("Final Download")
+                st.rerun()
+        return
+    
+    st.write("Upload **2 billing files** to deduplicate against **File 1** (newest). "
+             "Rows in File 1 with phone numbers matching either billing file will be removed.")
+    st.info("Only File 1 is modified. Files 2-5 remain unchanged.")
+    
+    st.divider()
+    
+    # File uploaders for 2 billing files
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**Billing File 1**")
+        billing_file_1 = st.file_uploader(
+            "Upload Billing File 1",
+            type=['xlsx', 'xls', 'csv'],
+            key='multi_billing_file_1',
+            label_visibility="collapsed"
+        )
+    
+    with col2:
+        st.markdown("**Billing File 2**")
+        billing_file_2 = st.file_uploader(
+            "Upload Billing File 2",
+            type=['xlsx', 'xls', 'csv'],
+            key='multi_billing_file_2',
+            label_visibility="collapsed"
+        )
+    
+    # Show status of uploads
+    if billing_file_1:
+        st.caption(f"✓ Billing File 1: {billing_file_1.name}")
+    if billing_file_2:
+        st.caption(f"✓ Billing File 2: {billing_file_2.name}")
+    
+    st.divider()
+    
+    # Apply button - only enabled when both files are uploaded
+    both_uploaded = billing_file_1 is not None and billing_file_2 is not None
+    
+    if not both_uploaded:
+        st.warning("Please upload both billing files to proceed.")
+    
+    if st.button("Remove matching phones from File 1", type="primary", disabled=not both_uploaded):
+        with st.spinner("Processing billing deduplication..."):
+            # Read billing files into DataFrames
+            billing_file_1.seek(0)
+            billing_df_1 = read_uploaded_file(BytesIO(billing_file_1.read()), billing_file_1.name)
+            
+            billing_file_2.seek(0)
+            billing_df_2 = read_uploaded_file(BytesIO(billing_file_2.read()), billing_file_2.name)
+            
+            # Dedupe File 1 against both billing files
+            file1_state = workflow_state.files[0]
+            df = file1_state.cleaned_df.copy()
+            before_count = len(df)
+            
+            result = dedupe_against_files(df, [billing_df_1, billing_df_2], phone_col)
+            
+            # Update File 1 state
+            file1_state.cleaned_df = result.cleaned_df
+            
+            # Track removed rows
+            removed_df = result.removed_df
+            if result.removed_count > 0:
+                removed_df = removed_df.copy()
+                removed_df['_removal_reason'] = 'billing_dedupe'
+                if file1_state.removed_df is None or len(file1_state.removed_df) == 0:
+                    file1_state.removed_df = removed_df.copy()
+                else:
+                    file1_state.removed_df = pd.concat(
+                        [file1_state.removed_df, removed_df],
+                        ignore_index=True
+                    )
+            
+            # Store step result for File 1
+            file1_state.step_results[10] = StepResult(
+                cleaned_df=result.cleaned_df,
+                all_removed_df=removed_df,
+                before_count=before_count,
+                after_count=len(result.cleaned_df),
+                removal_summary={"Billing phone match": result.removed_count}
+            )
+            
+            # Mark Files 2-5 as complete for step 10 (no changes)
+            for i in range(1, 5):
+                file_state = workflow_state.files[i]
+                if file_state.is_uploaded and file_state.cleaned_df is not None:
+                    file_state.step_results[10] = StepResult(
+                        cleaned_df=file_state.cleaned_df,
+                        all_removed_df=pd.DataFrame(),
+                        before_count=len(file_state.cleaned_df),
+                        after_count=len(file_state.cleaned_df),
+                        removal_summary={}
+                    )
+            
+            st.rerun()
+    
+    st.divider()
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("← Back to Step 9", use_container_width=True):
+            go_to_step("9. Bad States")
+            st.rerun()
 
 
 def render_multi_step3_dnc():
@@ -3019,17 +3201,17 @@ def render_multi_final_download():
             st.rerun()
         return
     
-    # Check if Step 9 Bad States has been done
-    bad_states_done = all(
-        9 in file_state.step_results 
+    # Check if Step 10 Clean against Billing has been done
+    billing_done = all(
+        10 in file_state.step_results 
         for file_state in workflow_state.files 
         if file_state.is_uploaded
     )
     
-    if not bad_states_done:
-        st.warning("Please complete Step 9 (Bad States) first.")
-        if st.button("← Go to Step 9"):
-            go_to_step("9. Bad States")
+    if not billing_done:
+        st.warning("Please complete Step 10 (Clean against Billing) first.")
+        if st.button("← Go to Step 10"):
+            go_to_step("10. Clean against Billing")
             st.rerun()
         return
     
@@ -3099,12 +3281,12 @@ def render_multi_final_download():
     
     st.divider()
     
-    # Navigation button - back to Step 9
+    # Navigation button - back to Step 10
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        if st.button("← Back to Step 9", use_container_width=True):
-            go_to_step("9. Bad States")
+        if st.button("← Back to Step 10", use_container_width=True):
+            go_to_step("10. Clean against Billing")
             st.rerun()
     
     with col2:
@@ -3172,6 +3354,8 @@ def main():
             render_step6_crossfile_dedupe()
         elif step == "7. Bad States":
             render_step7_bad_states()
+        elif step == "8. Clean against Billing":
+            render_step8_billing()
     
     elif workflow_mode == "multi":
         # Multi-file workflow (Requirement 1.4, 10.4)
@@ -3225,6 +3409,8 @@ def main():
             render_multi_step8_crossfile_dedupe()
         elif step == "9. Bad States":
             render_multi_step9_bad_states()
+        elif step == "10. Clean against Billing":
+            render_multi_step10_billing()
         elif step == "Final Download":
             render_multi_final_download()
 
@@ -3636,7 +3822,15 @@ def render_step7_bad_states():
             st.write(f"- {reason}: {count} rows")
         st.dataframe(result.cleaned_df.head(25))
         st.divider()
-        st.success("🎉 All steps complete! Your data has been fully cleaned.")
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("← Back to Step 6", use_container_width=True):
+                go_to_step("6. Cross-File Dedupe")
+                st.rerun()
+        with col2:
+            if st.button("Next → Step 8: Clean against Billing", type="primary", use_container_width=True):
+                go_to_step("8. Clean against Billing")
+                st.rerun()
         return
     
     if not bad_states:
@@ -3667,6 +3861,151 @@ def render_step7_bad_states():
     st.divider()
     if st.button("← Back to Step 6", use_container_width=True):
         go_to_step("6. Cross-File Dedupe")
+        st.rerun()
+
+
+def render_step8_billing():
+    """Step 8: Clean against Billing — dedupe the cleaned file against 2 uploaded billing files.
+    
+    Uploads 2 billing Excel files and removes rows from the cleaned data where the phone number
+    matches any phone in the billing files. Only the main file is modified.
+    """
+    st.header("Step 8: Clean against Billing")
+    
+    # Check prerequisite: Step 7 (Bad States) must be done
+    if st.session_state.step1b_result is None:
+        st.warning("Please complete Step 7 (Bad States) first.")
+        if st.button("← Back to Step 7"):
+            go_to_step("7. Bad States")
+            st.rerun()
+        return
+    
+    mapping = st.session_state.column_mapping
+    phone_col = mapping.phone or 'Phone1'
+    
+    # Check if billing step is already done
+    if st.session_state.billing_result is not None:
+        result = st.session_state.billing_result
+        st.success("✅ Billing deduplication complete!")
+        st.divider()
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Before", f"{result.before_count:,}")
+        col2.metric("Removed", f"{result.before_count - result.after_count:,}")
+        col3.metric("After", f"{result.after_count:,}")
+        st.subheader("Removal Summary")
+        for reason, count in result.removal_summary.items():
+            st.write(f"- {reason}: {count} rows")
+        st.dataframe(result.cleaned_df.head(25))
+        st.divider()
+        st.success("🎉 All steps complete! Your data has been fully cleaned.")
+        
+        # Download section
+        cache_key_cleaned = "excel_cache_billing_cleaned"
+        cache_key_removed = "excel_cache_billing_removed"
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write("**Final Cleaned Data**")
+            if cache_key_cleaned not in st.session_state:
+                with st.spinner("Preparing Excel file..."):
+                    st.session_state[cache_key_cleaned] = export_to_excel(result.cleaned_df)
+            st.download_button(
+                label="📥 Download Cleaned Excel",
+                data=st.session_state[cache_key_cleaned],
+                file_name="final_cleaned.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_billing_cleaned"
+            )
+        with col2:
+            if len(result.all_removed_df) > 0:
+                st.write("**Removed Rows (Billing)**")
+                if cache_key_removed not in st.session_state:
+                    with st.spinner("Preparing Excel file..."):
+                        st.session_state[cache_key_removed] = export_removed_rows_to_excel(result.all_removed_df, mapping)
+                st.download_button(
+                    label="📥 Download Removed Rows",
+                    data=st.session_state[cache_key_removed],
+                    file_name="removed_billing.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_billing_removed"
+                )
+        return
+    
+    st.write("Upload **2 billing files** to deduplicate against your cleaned data. "
+             "Rows with phone numbers matching either billing file will be removed.")
+    
+    st.divider()
+    
+    # File uploaders for 2 billing files
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**Billing File 1**")
+        billing_file_1 = st.file_uploader(
+            "Upload Billing File 1",
+            type=['xlsx', 'xls', 'csv'],
+            key='single_billing_file_1',
+            label_visibility="collapsed"
+        )
+    
+    with col2:
+        st.markdown("**Billing File 2**")
+        billing_file_2 = st.file_uploader(
+            "Upload Billing File 2",
+            type=['xlsx', 'xls', 'csv'],
+            key='single_billing_file_2',
+            label_visibility="collapsed"
+        )
+    
+    # Show status of uploads
+    if billing_file_1:
+        st.caption(f"✓ Billing File 1: {billing_file_1.name}")
+    if billing_file_2:
+        st.caption(f"✓ Billing File 2: {billing_file_2.name}")
+    
+    st.divider()
+    
+    # Apply button - only enabled when both files are uploaded
+    both_uploaded = billing_file_1 is not None and billing_file_2 is not None
+    
+    if not both_uploaded:
+        st.warning("Please upload both billing files to proceed.")
+    
+    if st.button("Remove matching phones", type="primary", disabled=not both_uploaded):
+        with st.spinner("Processing billing deduplication..."):
+            # Read billing files into DataFrames
+            billing_file_1.seek(0)
+            billing_df_1 = read_uploaded_file(BytesIO(billing_file_1.read()), billing_file_1.name)
+            
+            billing_file_2.seek(0)
+            billing_df_2 = read_uploaded_file(BytesIO(billing_file_2.read()), billing_file_2.name)
+            
+            # Get the current cleaned data from Step 7
+            df = st.session_state.step1b_result.cleaned_df.copy()
+            before_count = len(df)
+            
+            # Dedupe against both billing files
+            result = dedupe_against_files(df, [billing_df_1, billing_df_2], phone_col)
+            
+            # Track removed rows
+            removed_df = result.removed_df
+            if result.removed_count > 0:
+                removed_df = removed_df.copy()
+                removed_df['_removal_reason'] = 'billing_dedupe'
+            
+            # Store result
+            st.session_state.billing_result = StepResult(
+                cleaned_df=result.cleaned_df,
+                all_removed_df=removed_df,
+                before_count=before_count,
+                after_count=len(result.cleaned_df),
+                removal_summary={"Billing phone match": result.removed_count}
+            )
+            st.rerun()
+    
+    st.divider()
+    if st.button("← Back to Step 7", use_container_width=True):
+        go_to_step("7. Bad States")
         st.rerun()
 
 

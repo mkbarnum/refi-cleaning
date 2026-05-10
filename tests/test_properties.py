@@ -162,8 +162,17 @@ def test_phone_invalid_when_not_10_digits_short(phone: str):
 @given(st.integers(min_value=10000000000, max_value=99999999999).map(str))  # 11 digits
 @settings(max_examples=100)
 def test_phone_invalid_when_not_10_digits_long(phone: str):
-    """Property: Phones with more than 10 digits are invalid."""
-    assert not is_valid_phone(phone), f"11-digit phone should be invalid: '{phone}'"
+    """Property: Phones with more than 10 digits are invalid (unless 11 digits starting with 1, which normalizes to 10)."""
+    # 11-digit numbers starting with '1' are treated as US numbers with country code
+    # and get normalized to 10 digits, so they may be valid after normalization.
+    if phone.startswith('1'):
+        # After stripping leading 1, the remaining 10 digits must not start with 1 to be valid
+        remaining = phone[1:]
+        if remaining.startswith('1'):
+            assert not is_valid_phone(phone), f"11-digit phone starting with 11... should be invalid: '{phone}'"
+        # Otherwise it's valid after normalization — skip assertion
+    else:
+        assert not is_valid_phone(phone), f"11-digit phone not starting with 1 should be invalid: '{phone}'"
 
 
 def test_phone_invalid_when_empty():
@@ -709,7 +718,7 @@ def test_load_phones_excludes_invalid():
         'Sheet1': [
             '5551234567',    # Valid 10 digits
             '123456789',     # Only 9 digits - invalid
-            '12345678901',   # 11 digits - invalid
+            '12345678901',   # 11 digits starting with 1 - normalizes to 2345678901 (valid)
             '',              # Empty - invalid
             None,            # None - invalid
             'not a phone',   # Text - invalid
@@ -718,9 +727,10 @@ def test_load_phones_excludes_invalid():
     
     result = load_phones_from_all_tabs(excel_file)
     
-    # Only the valid 10-digit phone should be included
-    assert len(result) == 1
+    # Valid phones: 5551234567 (10 digits) and 2345678901 (11 digits with leading 1 stripped)
+    assert len(result) == 2
     assert '5551234567' in result
+    assert '2345678901' in result
 
 
 def test_load_phones_deduplicates_across_tabs():

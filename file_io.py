@@ -196,6 +196,7 @@ REASON_DESCRIPTIONS = {
     'prohibited_content': 'Contains prohibited content (loan depot, profanity)',
     'duplicate_phone': 'Duplicate phone number',
     'invalid_uuid': 'Invalid UUID format',
+    'billing_dedupe': 'Phone matches billing file',
 }
 
 # Mapping from reason codes to the column that caused the issue
@@ -211,6 +212,7 @@ REASON_TO_COLUMN_FIELD = {
     'placeholder_email': 'email',
     'duplicate_phone': 'phone',
     'invalid_uuid': 'lead_id',
+    'billing_dedupe': 'phone',
 }
 
 
