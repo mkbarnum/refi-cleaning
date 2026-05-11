@@ -1004,14 +1004,19 @@ def render_multi_step2_clean():
         
         # 4. Filter invalid emails
         update_progress(4, cleaning_steps[4])
-        results = apply_cleaning_to_all_files(
-            lambda df: filter_invalid_emails(df, mapping.email),
-            workflow_state.files,
-            'invalid_email'
-        )
-        for i, result in enumerate(results):
-            if result.removal_summary:
-                file_removal_summaries[i]['Invalid email'] = result.removal_summary.get('invalid_email', 0)
+        if mapping.email and all(
+            mapping.email in f.cleaned_df.columns
+            for f in workflow_state.files
+            if f.is_uploaded and f.cleaned_df is not None
+        ):
+            results = apply_cleaning_to_all_files(
+                lambda df: filter_invalid_emails(df, mapping.email),
+                workflow_state.files,
+                'invalid_email'
+            )
+            for i, result in enumerate(results):
+                if result.removal_summary:
+                    file_removal_summaries[i]['Invalid email'] = result.removal_summary.get('invalid_email', 0)
         
         # 5. Filter TEST entries
         update_progress(5, cleaning_steps[5])
@@ -1026,7 +1031,11 @@ def render_multi_step2_clean():
         
         # 6. Filter placeholder emails
         update_progress(6, cleaning_steps[6])
-        if mapping.email:
+        if mapping.email and all(
+            mapping.email in f.cleaned_df.columns
+            for f in workflow_state.files
+            if f.is_uploaded and f.cleaned_df is not None
+        ):
             results = apply_cleaning_to_all_files(
                 lambda df: filter_placeholder_emails(df, mapping.email),
                 workflow_state.files,
@@ -1038,7 +1047,11 @@ def render_multi_step2_clean():
         
         # 7. Filter fake/suspicious emails
         update_progress(7, cleaning_steps[7])
-        if mapping.email:
+        if mapping.email and all(
+            mapping.email in f.cleaned_df.columns
+            for f in workflow_state.files
+            if f.is_uploaded and f.cleaned_df is not None
+        ):
             results = apply_cleaning_to_all_files(
                 lambda df: filter_fake_emails(df, mapping.email),
                 workflow_state.files,
