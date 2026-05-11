@@ -317,56 +317,61 @@ def filter_invalid_emails(df: pd.DataFrame, email_col: str) -> CleanResult:
     )
 
 
-# Fake/invalid email detection patterns
+# Fake/invalid email detection — uses exact refusal matching, keyboard mashing,
+# and a comprehensive disposable domain blocklist for high-precision detection.
+# Avoids false positives on short legitimate emails (joe@company.com) and names
+# starting with "no" (noblettdenise@gmail.com, northtopauls@iclod.com).
+
+try:
+    from disposable_email_domains import blocklist as _DISPOSABLE_DOMAINS
+except ImportError:
+    # Fallback: small hardcoded set if package not installed
+    _DISPOSABLE_DOMAINS = {
+        'yopmail.com', 'mailinator.com', 'guerrillamail.com', 'tempmail.com',
+        'throwaway.com', 'trashmail.com', 'sharklasers.com', 'spam4.me',
+        'grr.la', 'dispostable.com', 'maildrop.cc', 'getairmail.com',
+        'teleworm.us', 'iubridge.com',
+    }
+
+# Exact local parts that are clearly fake/refusal (stripped of numbers/special chars)
 FAKE_EMAIL_LOCAL_PARTS = {
-    'none', 'noemail', 'no', 'nope', 'nothanks', 'nothing', 'noway', 'nowmail',
-    'test', 'testing', 'asdf', 'asdfa', 'asdfasdf', 'qwerty', 'abc', 'xyz',
-    'fake', 'fakeemail', 'noemail', 'nomail', 'notgiving', 'notgonna',
-    'johndoe', 'janedoe', 'john', 'jane', 'example', 'sample', 'demo',
+    'no', 'nope', 'none', 'noemail', 'nomail', 'fake', 'fakeemail',
+    'test', 'testing', 'asdf', 'asdfa', 'asdfasdf', 'qwerty',
+    'nothanks', 'noway', 'nothing', 'nowmail', 'notgiving', 'notgonna',
     'null', 'void', 'blank', 'empty', 'unknown', 'anonymous', 'anon',
+    'example', 'sample', 'demo', 'abc', 'xyz',
+    'notapplicable', 'na', 'nada', 'nil', 'noone', 'nobody',
+    'johndoe', 'janedoe',
     'temp', 'temporary', 'disposable', 'throwaway', 'trash',
-    'notapplicable', 'na', 'n/a', 'nada', 'nil', 'noone', 'nobody',
-    'nomorehackingallowed', 'notgoingtotellyou', 'notsay', 'notready',
 }
 
-FAKE_EMAIL_LOCAL_PREFIXES = [
-    'none', 'noemail', 'no@', 'nope', 'not@', 'not.', 'nothanks', 'nothing',
-    'noway', 'test', 'asdf', 'qwer', 'fake', 'johndoe', 'janedoe',
-    'nomail', 'notgiving', 'notgonna', 'utest', 'testtest',
-]
-
+# Domains that are clearly fake/refusal (not disposable services, just joke domains)
 FAKE_EMAIL_DOMAINS = {
     'noemail.com', 'nomail.com', 'none.com', 'nope.com', 'fake.com',
     'fakeemail.com', 'nothanks.com', 'thanks.com', 'noway.com',
     'nonya.com', 'nospampls.com', 'nospam.com', 'comfortable.com',
     'happening.com', 'ing.com', 'example.com', 'test.com', 'testing.com',
-    'mailinator.com', 'guerrillamail.com', 'tempmail.com', 'throwaway.com',
-    'trashmail.com', 'sharklasers.com', 'spam4.me', 'grr.la',
-    'dispostable.com', 'maildrop.cc', 'getairmail.com', 'yopmail.com',
 }
 
-# Gibberish patterns (random characters)
-GIBBERISH_PATTERNS = [
-    r'^[a-z]{1,4}@',  # Very short random letters before @
-    r'^[asdfjkl;]+@',  # Home row keyboard mashing
-    r'^[qwertyuiop]+@',  # Top row keyboard mashing
-    r'^[zxcvbnm]+@',  # Bottom row keyboard mashing
-    r'asdf',  # Common keyboard pattern
-    r'qwer',  # Common keyboard pattern
-    r'zxcv',  # Common keyboard pattern
-    r'^[a-z]{2,3}\d+@',  # 2-3 letters followed by numbers (like ab123@)
-]
+# Compiled keyboard mashing pattern
+_KEYBOARD_MASH_RE = re.compile(r'asdf|qwer|zxcv')
 
 
 def is_fake_email(email_value) -> bool:
     """Check if email appears to be fake, placeholder, or invalid.
     
-    Detects:
-    - Placeholder local parts (none, noemail, test, asdf, etc.)
-    - Fake/disposable domains
-    - Gibberish patterns
-    - Emails starting with special characters
-    - Refusal patterns (not@, noway@, etc.)
+    Detection strategy (high-precision, low false-positive):
+    1. Exact refusal local parts (no@, nope@, none@, test@, asdf@, fake@, etc.)
+    2. Keyboard mashing patterns (asdf, qwer, zxcv anywhere in local part)
+    3. Disposable/temporary email domains (yopmail.com, mailinator.com, etc.)
+    4. Fake/joke domains (noemail.com, noway.com, etc.)
+    5. johndoe/janedoe patterns
+    6. Emails starting with special characters
+    
+    Does NOT flag:
+    - Short but legitimate emails (joe@company.com, me@home.com)
+    - Names starting with "no" (noblettdenise@gmail.com, northtopauls@iclod.com)
+    - Typo domains like .con (those are typos, not fakes)
     
     Returns:
         True if email appears fake, False if it seems legitimate
@@ -393,56 +398,25 @@ def is_fake_email(email_value) -> bool:
     if not local_part or not domain:
         return True
     
-    # Check for fake local parts (exact match)
-    local_clean = re.sub(r'[^a-z]', '', local_part)  # Remove numbers/special chars for comparison
+    # 1. Exact refusal local parts (strip numbers/special chars for comparison)
+    local_clean = re.sub(r'[^a-z]', '', local_part)
     if local_clean in FAKE_EMAIL_LOCAL_PARTS:
         return True
     
-    # Check for fake local part prefixes
-    for prefix in FAKE_EMAIL_LOCAL_PREFIXES:
-        if local_part.startswith(prefix):
-            return True
+    # 2. Keyboard mashing patterns
+    if _KEYBOARD_MASH_RE.search(local_part):
+        return True
     
-    # Check for fake domains
+    # 3. Disposable/temporary email domains (comprehensive blocklist)
+    if domain in _DISPOSABLE_DOMAINS:
+        return True
+    
+    # 4. Fake/joke domains
     if domain in FAKE_EMAIL_DOMAINS:
         return True
     
-    # Check for domain ending in .con instead of .com
-    if domain.endswith('.con'):
-        return True
-    
-    # Check for gibberish patterns
-    for pattern in GIBBERISH_PATTERNS:
-        if re.search(pattern, email_str):
-            # Additional check: if it matches gibberish but is a real-looking email, skip
-            # Only flag if the local part is very short or clearly random
-            if len(local_part) <= 4 and re.match(r'^[a-z]+$', local_part):
-                return True
-    
-    # Check for "refusal" patterns in local part
-    refusal_patterns = [
-        r'^not[._]?[a-z]*@',  # not@, not.ready@, notgiving@
-        r'^no[._]?[a-z]*@',   # no@, no.way@
-        r'^nope',
-        r'^noway',
-        r'^nothanks',
-        r'^nothing',
-        r'^fake',
-        r'^test[0-9]*@',      # test@, test123@
-        r'^utest',            # utest@
-    ]
-    for pattern in refusal_patterns:
-        if re.match(pattern, email_str):
-            return True
-    
-    # Check for johndoe/janedoe patterns
+    # 5. johndoe/janedoe anywhere in local part
     if 'johndoe' in local_part or 'janedoe' in local_part:
-        return True
-    
-    # Check for domain that looks like a refusal
-    refusal_domains = ['happening', 'comfortable', 'nonya', 'nospam', 'thanks']
-    domain_name = domain.split('.')[0] if '.' in domain else domain
-    if domain_name in refusal_domains:
         return True
     
     return False
