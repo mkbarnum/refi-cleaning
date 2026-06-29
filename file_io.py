@@ -2,6 +2,7 @@
 
 from io import BytesIO
 from typing import BinaryIO, Dict, Union
+import re
 import zipfile
 import pandas as pd
 from openpyxl import load_workbook
@@ -10,6 +11,28 @@ from openpyxl.styles import PatternFill
 
 # Valid file extensions
 VALID_EXTENSIONS = {'.xlsx', '.xls', '.csv'}
+
+# Control characters that are illegal in XLSX XML (openpyxl raises
+# IllegalCharacterError on these). Matches the set openpyxl itself rejects:
+# \x00-\x08, \x0b, \x0c, \x0e-\x1f.
+_ILLEGAL_XLSX_CHARS_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
+
+
+def _sanitize_for_excel(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of df with illegal XML control characters stripped.
+
+    openpyxl raises IllegalCharacterError when a cell value contains control
+    characters that are not valid in XLSX XML. This strips those characters
+    from object/string columns so the export can succeed.
+    """
+    cleaned = df.copy()
+    for col in cleaned.columns:
+        # Only object/string columns can contain illegal characters
+        if cleaned[col].dtype == object:
+            cleaned[col] = cleaned[col].map(
+                lambda v: _ILLEGAL_XLSX_CHARS_RE.sub('', v) if isinstance(v, str) else v
+            )
+    return cleaned
 
 
 def _excel_engine() -> str:
@@ -129,7 +152,7 @@ def export_to_excel(df: pd.DataFrame) -> bytes:
     """
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False)
+        _sanitize_for_excel(df).to_excel(writer, index=False)
     return output.getvalue()
 
 
@@ -313,7 +336,7 @@ def export_removed_rows_to_excel(df: pd.DataFrame, column_mapping) -> bytes:
     # Write to Excel
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        export_df.to_excel(writer, index=False, sheet_name='Removed Rows')
+        _sanitize_for_excel(export_df).to_excel(writer, index=False, sheet_name='Removed Rows')
         
         # Get the worksheet to apply highlighting
         ws = writer.sheets['Removed Rows']
