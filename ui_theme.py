@@ -101,13 +101,18 @@ h3 { font-size: 1.15rem; }
   outline-offset: 1px;
   border-color: var(--rc-primary);
 }
-/* Button labels render inside a <p>; make them follow the button color
-   instead of the global body-text color (fixes dark text on the blue button). */
-.stButton > button p, .stDownloadButton > button p { color: inherit !important; }
 .stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {
   background: var(--rc-primary);
   border-color: var(--rc-primary);
   color: #fff;
+}
+/* Force the label + icon inside primary buttons to white. The label renders in a
+   nested <p>/markdown container that otherwise inherits the dark body-text color;
+   cover the button and every descendant, by kind and by Streamlit test-id. */
+.stButton > button[kind="primary"], .stButton > button[kind="primary"] *,
+.stDownloadButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] *,
+button[data-testid="stBaseButton-primary"], button[data-testid="stBaseButton-primary"] * {
+  color: #fff !important;
 }
 .stButton > button[kind="primary"]:hover, .stDownloadButton > button[kind="primary"]:hover {
   background: var(--rc-primary-dark);
