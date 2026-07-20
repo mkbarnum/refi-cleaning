@@ -41,5 +41,8 @@ Thumbs.db
 # Kiro specs (development only)
 .kiro/
 
+# Browser automation tool artifacts (Playwright MCP)
+.playwright-mcp/
+
 # Temp files
 ~$*

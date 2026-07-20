@@ -26,6 +26,9 @@ from matching import (
     filter_by_area_code, filter_by_name_match, filter_by_dnc_phones,
     filter_by_tcpa_phones, filter_by_tcpa_zips, load_phones_from_all_tabs
 )
+import pipeline
+import ui_theme
+from file_io import REASON_DESCRIPTIONS
 
 
 def load_file_with_progress(file_bytes: bytes, filename: str, container=None) -> pd.DataFrame:
@@ -47,12 +50,12 @@ def load_file_with_progress(file_bytes: bytes, filename: str, container=None) ->
     
     # Show what's actually happening - reading the file with pandas
     file_type = "Excel" if ext in ['.xlsx', '.xls'] else "CSV"
-    status_text.write(f"📂 Reading {file_type} file ({file_size_mb:.1f} MB)...")
+    status_text.write(f"Reading {file_type} file ({file_size_mb:.1f} MB)...")
     
     # Actually read the file - this is where the real work happens
     df = read_uploaded_file(BytesIO(file_bytes), filename)
     
-    status_text.write(f"✅ Loaded {len(df):,} rows")
+    status_text.write(f":material/check_circle: Loaded {len(df):,} rows")
     time.sleep(0.3)  # Brief pause to show completion
     
     # Clear status
@@ -140,6 +143,30 @@ def init_session_state():
     # Step 6: Master Phone Suppression state (single-file workflow)
     if 'master_phone_result' not in st.session_state:
         st.session_state.master_phone_result = None
+    # Fast (one-click) workflow state — namespaced so it never collides with
+    # the classic single/multi keys. 'fast_stage': 1=upload data, 2=upload
+    # config, 3=run/results.
+    if 'fast_stage' not in st.session_state:
+        st.session_state.fast_stage = 1
+    if 'fast_data' not in st.session_state:
+        # For fast_single: list with one dict; for fast_multi: up to 5 dicts.
+        # Each dict: {'df', 'filename', 'raw_bytes', 'ext'}
+        st.session_state.fast_data = []
+    if 'fast_result' not in st.session_state:
+        st.session_state.fast_result = None
+    if 'fast_do_run' not in st.session_state:
+        st.session_state.fast_do_run = False
+
+
+def clear_fast_state():
+    """Clear the fast (one-click) workflow state."""
+    st.session_state.fast_stage = 1
+    st.session_state.fast_data = []
+    st.session_state.fast_result = None
+    st.session_state.fast_do_run = False
+    st.session_state.column_mapping = ColumnMapping()
+    for key in [k for k in st.session_state.keys() if k.startswith('excel_cache_fast_')]:
+        del st.session_state[key]
 
 
 # Single-file workflow steps (existing behavior)
@@ -176,6 +203,18 @@ STEPS = SINGLE_FILE_STEPS
 
 # Logo configuration - path to company logo image
 LOGO_PATH = "2422678.png"
+
+
+@st.cache_data(show_spinner=False)
+def _logo_data_uri() -> Optional[str]:
+    """Return the logo as a base64 data URI for inline HTML, or None if missing."""
+    import base64
+    try:
+        with open(LOGO_PATH, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode("ascii")
+        return f"data:image/png;base64,{encoded}"
+    except Exception:
+        return None
 
 
 def clear_single_file_state():
@@ -275,6 +314,7 @@ def clear_all_workflow_state():
     """
     clear_single_file_state()
     clear_multi_file_state()
+    clear_fast_state()
     st.session_state.workflow_mode = None
     st.session_state.current_step = "1. Upload Raw Data"
 
@@ -303,8 +343,12 @@ def has_existing_workflow_state() -> bool:
         st.session_state.multi_file_state is not None and
         any(f.is_uploaded for f in st.session_state.multi_file_state.files)
     )
-    
-    return has_single_file_state or has_multi_file_state
+
+    # Check fast (one-click) workflow state
+    has_fast_state = bool(st.session_state.get('fast_data')) or \
+        st.session_state.get('fast_result') is not None
+
+    return has_single_file_state or has_multi_file_state or has_fast_state
 
 
 def render_home_page():
@@ -316,94 +360,570 @@ def render_home_page():
     
     Requirements: 1.1, 1.2, 1.3, 1.4, 9.3
     """
-    # Center the content
-    col1, col2, col3 = st.columns([1, 2, 1])
-    
+    col1, col2, col3 = st.columns([1, 5, 1])
+
     with col2:
-        # Display company logo (Requirement 1.1) - centered and smaller
-        try:
-            # Use a narrower column to center and constrain logo size
-            logo_col1, logo_col2, logo_col3 = st.columns([1, 2, 1])
-            with logo_col2:
-                st.image(LOGO_PATH, use_container_width=True)
-        except Exception:
-            # If logo file not found, show a placeholder header
-            st.title("🏠 Refinance Data Cleansing")
-        
-        st.markdown("---")
-        
-        # Check for existing workflow state and offer to clear (Requirement 9.3)
-        if has_existing_workflow_state():
-            st.warning("⚠️ You have existing workflow data that will be preserved.")
-            st.write("Choose a workflow to continue, or clear all data to start fresh.")
-            
-            if st.button(
-                "🗑️ Clear and Start Over",
-                type="secondary",
-                use_container_width=True,
-                help="Clear all existing workflow data and start fresh"
-            ):
-                clear_all_workflow_state()
-                st.success("✓ All workflow data cleared!")
-                st.rerun()
-            
-            st.markdown("---")
-        
-        # Welcome message
-        st.markdown("### Welcome! Choose your workflow:")
+        ui_theme.render_hero(
+            "Refinance Data Cleansing",
+            "Clean lead files against DNC, TCPA, and suppression lists — then download "
+            "results and a full record of what was removed.",
+            _logo_data_uri(),
+        )
+
         st.write("")
-        
-        # Navigation buttons (Requirement 1.2)
-        button_col1, button_col2 = st.columns(2)
-        
-        with button_col1:
-            # Clean 1 File button (Requirement 1.3)
-            if st.button(
-                "📄 Clean 1 File",
-                type="primary",
-                use_container_width=True,
-                help="Process a single file through the cleaning pipeline"
-            ):
-                # Clear multi-file state when switching to single-file (Requirement 9.4)
+
+        # Existing-state banner
+        if has_existing_workflow_state():
+            st.info("You have existing workflow data. Choose a workflow to continue, or clear it to start fresh.", icon=":material/history:")
+            if st.button("Clear and start over", type="secondary", icon=":material/delete:",
+                         use_container_width=False, key="home_clear",
+                         help="Clear all existing workflow data and start fresh"):
+                clear_all_workflow_state()
+                st.rerun()
+
+        st.markdown("#### Fast — one click")
+        st.caption("Upload everything up front, run the whole pipeline in a single click.")
+
+        fast_col1, fast_col2 = st.columns(2)
+        with fast_col1:
+            ui_theme.home_card(
+                "Fast", "fast", ui_theme.IC["fast"], ui_theme.IC["one_file"], "Fast Clean — 1 File",
+                "Upload one data file, then your suppression and billing files, and run "
+                "the entire pipeline at once.",
+            )
+            if st.button("Start — 1 file", type="primary", icon=":material/bolt:",
+                         use_container_width=True, key="home_fast_single"):
+                clear_single_file_state()
                 clear_multi_file_state()
+                clear_fast_state()
+                st.session_state.workflow_mode = "fast_single"
+                st.rerun()
+        with fast_col2:
+            ui_theme.home_card(
+                "Fast", "fast", ui_theme.IC["fast"], ui_theme.IC["many_files"], "Fast Clean — 5 Files",
+                "Upload up to 5 weekly files (newest first) plus shared lists, and run "
+                "everything — including cross-file dedupe — at once.",
+            )
+            if st.button("Start — 5 files", type="primary", icon=":material/bolt:",
+                         use_container_width=True, key="home_fast_multi"):
+                clear_single_file_state()
+                clear_multi_file_state()
+                clear_fast_state()
+                st.session_state.workflow_mode = "fast_multi"
+                st.rerun()
+
+        st.write("")
+        st.markdown("#### Step-by-step")
+        st.caption("The original guided workflows — review removal stats after each step.")
+
+        classic_col1, classic_col2 = st.columns(2)
+        with classic_col1:
+            ui_theme.home_card(
+                "Guided", "classic", ui_theme.IC["details"], ui_theme.IC["one_file"], "Clean 1 File",
+                "The original guided single-file workflow, one step at a time.",
+            )
+            if st.button("Open — 1 file", icon=":material/description:",
+                         use_container_width=True, key="home_classic_single"):
+                clear_multi_file_state()
+                clear_fast_state()
                 st.session_state.workflow_mode = "single"
                 st.session_state.current_step = "1. Upload Raw Data"
                 st.rerun()
-        
-        with button_col2:
-            # Clean 5 Files button (Requirement 1.4)
-            if st.button(
-                "📁 Clean 5 Files",
-                type="primary",
-                use_container_width=True,
-                help="Process 5 files through the complete multi-file workflow"
-            ):
-                # Clear single-file state when switching to multi-file (Requirement 9.4)
+        with classic_col2:
+            ui_theme.home_card(
+                "Guided", "classic", ui_theme.IC["details"], ui_theme.IC["many_files"], "Clean 5 Files",
+                "The original guided multi-file workflow with intermediate download checkpoints.",
+            )
+            if st.button("Open — 5 files", icon=":material/folder_open:",
+                         use_container_width=True, key="home_classic_multi"):
                 clear_single_file_state()
+                clear_fast_state()
                 st.session_state.workflow_mode = "multi"
                 st.session_state.current_step = "1. Upload 5 Files"
-                # Initialize multi-file workflow state (Requirement 9.1)
                 init_multi_file_workflow_state()
                 st.rerun()
-        
-        st.write("")
-        st.markdown("---")
-        
-        # Workflow descriptions
-        with st.expander("ℹ️ About the workflows"):
-            st.markdown("""
-            **Clean 1 File** - Single-file workflow:
-            - Upload one data file
-            - Clean bad data, filter by DNC, zip codes, and phone numbers
-            - Cross-file deduplication with additional files
-            
-            **Clean 5 Files** - Multi-file workflow:
-            - Upload 5 data files at once
-            - Process all files through the complete cleaning pipeline
-            - Master phone list suppression
-            - Cross-file deduplication across all 5 files
-            - Download intermediate and final results
-            """)
+
+
+# =========================================================================== #
+# Fast (one-click) workflow
+# =========================================================================== #
+
+FAST_MAPPING_DEFAULTS = {
+    'phone': 'Phone1', 'first_name': 'FirstName', 'last_name': 'LastName',
+    'email': 'Email', 'zip_code': 'ZipCode', 'lead_id': 'Universal_LeadId',
+    'state': 'State',
+}
+
+
+def _set_fast_mapping():
+    mapping = st.session_state.column_mapping
+    for field, col in FAST_MAPPING_DEFAULTS.items():
+        setattr(mapping, field, col)
+    st.session_state.column_mapping = mapping
+
+
+@st.cache_data(show_spinner=False)
+def _read_data_file_cached(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    """Read + validate + column-filter a data file. Cached on the raw bytes."""
+    df = read_uploaded_file(BytesIO(file_bytes), filename)
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def _read_supp_df_cached(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    """Read a generic suppression/billing file into a DataFrame (cached)."""
+    return read_uploaded_file(BytesIO(file_bytes), filename)
+
+
+@st.cache_data(show_spinner=False)
+def _read_dnc_df_cached(file_bytes: bytes) -> pd.DataFrame:
+    """Read the DNC file from 'Sheet1 (2)' (or the last sheet). Cached."""
+    xl = pd.ExcelFile(BytesIO(file_bytes))
+    sheet_name = 'Sheet1 (2)' if 'Sheet1 (2)' in xl.sheet_names else xl.sheet_names[-1]
+    return pd.read_excel(xl, sheet_name=sheet_name)
+
+
+@st.cache_data(show_spinner=False)
+def _load_master_set_cached(file_bytes: bytes) -> set:
+    """Extract normalized phones from all tabs of the master list. Cached."""
+    return load_phones_from_all_tabs(BytesIO(file_bytes))
+
+
+@st.cache_data(show_spinner=False)
+def _detect_highlights_cached(file_bytes: bytes) -> set:
+    """Detect highlighted cells for File 1. Cached on the raw bytes."""
+    _, highlighted = read_excel_with_highlights(BytesIO(file_bytes))
+    return highlighted
+
+
+def render_fast_workflow(multi: bool):
+    """Render the fast (one-click) workflow — a 3-stage flow.
+
+    Stage 1: upload data file(s). Stage 2: upload suppression/billing files.
+    Stage 3: run the whole pipeline and show results. Any missing config file
+    simply skips its stage.
+    """
+    title = "Fast Clean — 5 Files" if multi else "Fast Clean — 1 File"
+    title_icon = ":material/folder_open:" if multi else ":material/description:"
+    st.title(title, anchor=False)
+
+    st.sidebar.markdown("### Navigation")
+    if st.sidebar.button("Home", icon=":material/home:", use_container_width=True, key="fast_home"):
+        st.session_state.workflow_mode = None
+        st.rerun()
+    if st.sidebar.button("Start over", icon=":material/restart_alt:", use_container_width=True, key="fast_reset"):
+        clear_fast_state()
+        st.rerun()
+
+    steps = ["Upload data", "Upload lists", "Run & results"]
+    stage = st.session_state.fast_stage
+    ui_theme.render_stepper(steps, stage - 1)
+
+    if stage == 1:
+        _fast_stage_upload_data(multi)
+    elif stage == 2:
+        _fast_stage_upload_config(multi)
+    else:
+        _fast_stage_run_and_results(multi)
+
+
+def _fast_stage_upload_data(multi: bool):
+    max_files = 5 if multi else 1
+    if multi:
+        st.subheader("Upload your data files (newest first)")
+        st.caption("File 1 = newest week. Upload 1–5 files; cross-file dedupe runs when you provide 2 or more.")
+    else:
+        st.subheader("Upload your data file")
+
+    with st.expander("Required columns", expanded=False):
+        st.write(", ".join(REQUIRED_COLUMNS))
+
+    uploaded_data = []
+    # Pre-build a column grid (3 per row) for the multi layout so columns are
+    # created once, not per-iteration.
+    if multi:
+        grid = []
+        for row_start in range(0, max_files, 3):
+            row_cols = st.columns(3)
+            grid.extend(row_cols)
+    for i in range(max_files):
+        label = f"File {i + 1}" + (" (newest)" if multi and i == 0 else "")
+        target = (grid[i] if multi else st)
+        up = target.file_uploader(
+            label, type=['xlsx', 'xls', 'csv'], key=f"fast_data_{i}",
+            accept_multiple_files=False,
+        )
+        if up is not None:
+            try:
+                file_bytes = up.getvalue()
+                df = _read_data_file_cached(file_bytes, up.name)
+                is_valid, missing = validate_required_columns(df)
+                if not is_valid:
+                    target.error(f"{up.name}: missing {', '.join(missing)}")
+                    continue
+                df, dropped = filter_to_required_columns(df)
+                uploaded_data.append({
+                    'df': df, 'filename': up.name, 'raw_bytes': file_bytes,
+                    'ext': get_file_extension(up.name),
+                })
+                target.success(f"{len(df):,} rows loaded", icon=":material/check_circle:")
+            except Exception as e:
+                target.error(f"Error reading {up.name}: {e}", icon=":material/error:")
+
+    st.session_state.fast_data = uploaded_data
+
+    st.divider()
+    count = len(uploaded_data)
+    if count == 0:
+        st.info("Upload at least one file to continue.", icon=":material/upload_file:")
+    else:
+        st.markdown(f"**{count}** file{'s' if count != 1 else ''} ready.")
+        if st.button("Next: upload lists", type="primary", icon=":material/arrow_forward:"):
+            _set_fast_mapping()
+            st.session_state.fast_stage = 2
+            st.rerun()
+
+
+def _fast_stage_upload_config(multi: bool):
+    st.subheader("Upload suppression & billing files")
+    st.caption("All optional — any file you skip simply skips that stage of the pipeline.")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**TCPA DNC list**")
+        st.file_uploader("DNC", type=['xlsx', 'xls'], key="fast_cfg_dnc", label_visibility="collapsed")
+        st.markdown("**Zip codes to remove**")
+        st.file_uploader("Zips", type=['xlsx', 'xls'], key="fast_cfg_zip", label_visibility="collapsed")
+        st.markdown("**TCPA phones list**")
+        st.file_uploader("Phones", type=['xlsx', 'xls', 'csv'], key="fast_cfg_phones", label_visibility="collapsed")
+    with c2:
+        st.markdown("**Master phone list** (multi-tab)")
+        st.file_uploader("Master", type=['xlsx', 'xls'], key="fast_cfg_master", label_visibility="collapsed")
+        st.markdown("**Billing files** (up to 2)")
+        st.file_uploader("Billing", type=['xlsx', 'xls', 'csv'], key="fast_cfg_billing",
+                         accept_multiple_files=True, label_visibility="collapsed")
+        st.markdown("**Bad states file** (optional)")
+        st.file_uploader("Bad states", type=['csv', 'txt', 'xlsx', 'xls'],
+                         key="fast_cfg_bad_states", label_visibility="collapsed")
+
+    st.divider()
+    st.checkbox("Always remove AZ, DE, and TX", value=True, key="fast_always_azdetx")
+
+    # Live summary of what will run.
+    planned = ["Clean Bad Data"]
+    if st.session_state.get("fast_cfg_dnc"):
+        planned.append("TCPA DNC")
+    if st.session_state.get("fast_cfg_zip"):
+        planned.append("Zip Code Removal")
+    if st.session_state.get("fast_cfg_phones"):
+        planned.append("Phone Number Removal")
+    if st.session_state.get("fast_cfg_master"):
+        planned.append("Master Phone Suppression")
+    if multi and len(st.session_state.fast_data) >= 2:
+        planned.append("Cross-File Dedupe")
+    if st.session_state.get("fast_always_azdetx") or st.session_state.get("fast_cfg_bad_states"):
+        planned.append("Bad States")
+    if st.session_state.get("fast_cfg_billing"):
+        planned.append("Clean against Billing")
+    st.info("Stages that will run:  " + "  →  ".join(planned), icon=":material/checklist:")
+
+    col_back, col_run = st.columns([1, 1])
+    with col_back:
+        if st.button("Back", icon=":material/arrow_back:", use_container_width=True):
+            st.session_state.fast_stage = 1
+            st.rerun()
+    with col_run:
+        if st.button("Run pipeline", type="primary", icon=":material/play_arrow:", use_container_width=True):
+            st.session_state.fast_do_run = True
+            st.session_state.fast_stage = 3
+            st.rerun()
+
+
+def _build_fast_config(multi: bool) -> pipeline.PipelineConfig:
+    """Parse the uploaded config widgets into a PipelineConfig (each parse cached)."""
+    cfg = pipeline.PipelineConfig()
+
+    dnc = st.session_state.get("fast_cfg_dnc")
+    if dnc is not None:
+        cfg.dnc_df = _read_dnc_df_cached(dnc.getvalue())
+
+    zips = st.session_state.get("fast_cfg_zip")
+    if zips is not None:
+        cfg.zips_df = _read_supp_df_cached(zips.getvalue(), zips.name)
+
+    phones = st.session_state.get("fast_cfg_phones")
+    if phones is not None:
+        cfg.phones_df = _read_supp_df_cached(phones.getvalue(), phones.name)
+
+    master = st.session_state.get("fast_cfg_master")
+    if master is not None:
+        cfg.master_phone_set = _load_master_set_cached(master.getvalue())
+
+    billing = st.session_state.get("fast_cfg_billing") or []
+    if billing:
+        cfg.billing_dfs = [_read_supp_df_cached(b.getvalue(), b.name) for b in billing]
+
+    bad_states = set()
+    if st.session_state.get("fast_always_azdetx", True):
+        bad_states |= pipeline.DEFAULT_BAD_STATES
+    bad_file = st.session_state.get("fast_cfg_bad_states")
+    if bad_file is not None:
+        bad_states |= _load_bad_states_from_file(bad_file)
+    cfg.bad_states_set = bad_states
+
+    return cfg
+
+
+def _fast_stage_run_and_results(multi: bool):
+    if not st.session_state.fast_data:
+        st.warning("No data files found. Please start over.", icon=":material/warning:")
+        if st.button("Back to upload", icon=":material/arrow_back:"):
+            st.session_state.fast_stage = 1
+            st.rerun()
+        return
+
+    # Run the pipeline (only once; result cached in session state).
+    if st.session_state.fast_do_run or st.session_state.fast_result is None:
+        st.session_state.fast_do_run = False
+        mapping = st.session_state.column_mapping
+        cfg = _build_fast_config(multi)
+
+        # Full ordered stage list for a live checklist (only the ones that will run).
+        planned_stages = [pipeline.STAGE_CLEAN]
+        if cfg.dnc_df is not None:
+            planned_stages.append(pipeline.STAGE_DNC)
+        if cfg.zips_df is not None:
+            planned_stages.append(pipeline.STAGE_ZIP)
+        if cfg.phones_df is not None:
+            planned_stages.append(pipeline.STAGE_PHONES)
+        if cfg.master_phone_set:
+            planned_stages.append(pipeline.STAGE_MASTER)
+        if multi and len(st.session_state.fast_data) >= 2:
+            planned_stages.append(pipeline.STAGE_CROSSFILE)
+        if cfg.bad_states_set:
+            planned_stages.append(pipeline.STAGE_BAD_STATES)
+        if cfg.billing_dfs:
+            planned_stages.append(pipeline.STAGE_BILLING)
+
+        st.markdown("#### Running pipeline")
+        progress_bar = st.progress(0.0)
+        status = st.empty()
+        total_stages = len(planned_stages)
+        counter = {'n': 0}
+
+        def on_stage(label):
+            # Render a live checklist: completed stages checked, current active.
+            active = counter['n']
+            with status.container():
+                st.markdown(ui_theme.render_checklist(planned_stages, active), unsafe_allow_html=True)
+            counter['n'] += 1
+            progress_bar.progress(min(counter['n'] / total_stages, 1.0))
+
+        with st.spinner("Running pipeline…"):
+            if multi:
+                dfs = [d['df'] for d in st.session_state.fast_data]
+                names = [d['filename'] for d in st.session_state.fast_data]
+                first = st.session_state.fast_data[0]
+                highlights = None
+                if first['ext'] in ('.xlsx', '.xls'):
+                    try:
+                        highlights = _detect_highlights_cached(first['raw_bytes'])
+                    except Exception:
+                        highlights = None
+                result = pipeline.run_full_pipeline_multi(
+                    dfs, names, mapping, cfg, highlighted_cells_file1=highlights, progress=on_stage,
+                )
+            else:
+                d0 = st.session_state.fast_data[0]
+                highlights = None
+                if d0['ext'] in ('.xlsx', '.xls'):
+                    try:
+                        highlights = _detect_highlights_cached(d0['raw_bytes'])
+                    except Exception:
+                        highlights = None
+                result = pipeline.run_full_pipeline_single(
+                    d0['df'], mapping, cfg, highlighted_cells=highlights, progress=on_stage,
+                )
+        progress_bar.progress(1.0)
+        status.empty()
+        st.session_state.fast_result = result
+        st.rerun()
+
+    result = st.session_state.fast_result
+    st.success("Pipeline complete. Review the results below and download your files.", icon=":material/celebration:")
+
+    if multi:
+        _fast_render_multi_results(result)
+    else:
+        _fast_render_single_results(result)
+
+    st.divider()
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Run another batch", icon=":material/restart_alt:", use_container_width=True):
+            clear_fast_state()
+            st.rerun()
+    with col2:
+        if st.button("Return to home", type="primary", icon=":material/home:", use_container_width=True):
+            st.session_state.workflow_mode = None
+            st.rerun()
+
+
+def _fast_render_stage_table(stages) -> None:
+    """Render the per-stage outcome table with aligned counts and a status column."""
+    rows = []
+    for s in stages:
+        if s.ran:
+            rows.append({
+                "Stage": s.label,
+                "Status": "Ran",
+                "Before": f"{s.before_count:,}",
+                "Removed": f"{s.removed_count:,}",
+                "After": f"{s.after_count:,}",
+            })
+        else:
+            rows.append({
+                "Stage": s.label,
+                "Status": f"Skipped — {s.skip_reason}",
+                "Before": "—", "Removed": "—", "After": "—",
+            })
+    df = pd.DataFrame(rows)
+    st.dataframe(
+        df, use_container_width=True, hide_index=True,
+        column_config={
+            "Stage": st.column_config.TextColumn(width="medium"),
+            "Status": st.column_config.TextColumn(width="medium"),
+            "Before": st.column_config.TextColumn(width="small"),
+            "Removed": st.column_config.TextColumn(width="small"),
+            "After": st.column_config.TextColumn(width="small"),
+        },
+    )
+
+
+def _fast_render_removed_expanders(removed_df: pd.DataFrame, heading: bool = True):
+    if removed_df is None or len(removed_df) == 0 or '_removal_reason' not in removed_df.columns:
+        return
+    if heading:
+        st.markdown("###### Removed rows by reason")
+    for reason in removed_df['_removal_reason'].unique():
+        subset = removed_df[removed_df['_removal_reason'] == reason]
+        label = REASON_DESCRIPTIONS.get(reason, reason)
+        with st.expander(f"{label}: {len(subset):,} rows"):
+            display_cols = [c for c in subset.columns if not c.startswith('_')]
+            st.dataframe(subset[display_cols].head(100).astype(str), use_container_width=True)
+            if len(subset) > 100:
+                st.caption(f"Showing first 100 of {len(subset):,} rows")
+
+
+def _fast_render_single_results(result: 'pipeline.SinglePipelineResult'):
+    total_removed = result.original_count - result.final_count
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Original", f"{result.original_count:,}")
+    c2.metric("Total Removed", f"{total_removed:,}")
+    c3.metric("Final", f"{result.final_count:,}")
+
+    st.markdown("###### What happened at each stage")
+    _fast_render_stage_table(result.stages)
+
+    _fast_render_removed_expanders(result.removed_df)
+
+    st.markdown("###### Cleaned data preview")
+    st.dataframe(result.cleaned_df.head(25), use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.markdown("#### Downloads")
+    mapping = st.session_state.column_mapping
+    dcol1, dcol2 = st.columns(2)
+    with dcol1:
+        ck = "excel_cache_fast_single_cleaned"
+        if ck not in st.session_state:
+            st.session_state[ck] = export_to_excel(result.cleaned_df)
+        st.download_button(
+            "Cleaned Excel", st.session_state[ck],
+            file_name="final_cleaned.xlsx", icon=":material/download:",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary", use_container_width=True, key="fast_dl_single_cleaned",
+        )
+        st.caption(f"{result.final_count:,} cleaned rows.")
+    with dcol2:
+        ck2 = "excel_cache_fast_single_removed"
+        if ck2 not in st.session_state:
+            if len(result.removed_df) > 0:
+                st.session_state[ck2] = export_removed_rows_to_excel(result.removed_df, mapping)
+            else:
+                st.session_state[ck2] = None
+        if st.session_state[ck2] is not None:
+            st.download_button(
+                "Removed rows", st.session_state[ck2],
+                file_name="all_removed_rows.xlsx", icon=":material/download:",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True, key="fast_dl_single_removed",
+            )
+            st.caption("Includes Step and Reason columns for every removed row.")
+        else:
+            st.caption("No rows were removed.")
+
+
+def _fast_render_multi_results(result: 'pipeline.MultiPipelineResult'):
+    total_before = sum(f.original_count for f in result.files)
+    total_after = sum(f.final_count for f in result.files)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Original (all files)", f"{total_before:,}")
+    c2.metric("Total Removed", f"{total_before - total_after:,}")
+    c3.metric("Final (all files)", f"{total_after:,}")
+
+    st.markdown("###### Per-file results")
+    per_file = []
+    for i, f in enumerate(result.files):
+        per_file.append({
+            "File": f"File {i + 1}",
+            "Filename": f.filename,
+            "Original": f"{f.original_count:,}",
+            "Removed": f"{f.original_count - f.final_count:,}",
+            "Final": f"{f.final_count:,}",
+        })
+    per_file.append({
+        "File": "Total", "Filename": "",
+        "Original": f"{total_before:,}",
+        "Removed": f"{total_before - total_after:,}",
+        "Final": f"{total_after:,}",
+    })
+    st.dataframe(pd.DataFrame(per_file), use_container_width=True, hide_index=True)
+
+    st.markdown("###### What happened at each stage")
+    _fast_render_stage_table(result.stages)
+
+    for i, f in enumerate(result.files):
+        removed_n = f.original_count - f.final_count
+        with st.expander(f"File {i + 1}: {f.filename} — {removed_n:,} removed, {f.final_count:,} kept"):
+            _fast_render_removed_expanders(f.removed_df, heading=False)
+            st.caption("Cleaned preview")
+            st.dataframe(f.cleaned_df.head(15), use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.markdown("#### Download")
+    mapping = st.session_state.column_mapping
+    ck = "excel_cache_fast_multi_zip"
+    if ck not in st.session_state:
+        with st.spinner("Building ZIP…"):
+            buf = BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for i, f in enumerate(result.files):
+                    base = f.filename.rsplit(".", 1)[0] if f.filename and "." in f.filename else (f.filename or f"File{i+1}")
+                    if f.cleaned_df is not None and len(f.cleaned_df) > 0:
+                        zf.writestr(f"{base} - AZ DE TX removed (CLEANED).xlsx", export_to_excel(f.cleaned_df))
+                    if f.removed_df is not None and len(f.removed_df) > 0:
+                        zf.writestr(
+                            f"removed_rows/{base} (REMOVED).xlsx",
+                            export_removed_rows_to_excel(f.removed_df, mapping),
+                        )
+            st.session_state[ck] = buf.getvalue()
+    st.download_button(
+        "All final files (ZIP)", st.session_state[ck], file_name="final_files.zip",
+        icon=":material/folder_zip:",
+        mime="application/zip", type="primary", use_container_width=True, key="fast_dl_multi_zip",
+    )
+    st.caption("Final files at root; removed rows (with Reason column) under removed_rows/.")
 
 
 def go_to_step(step_name: str):
@@ -549,7 +1069,7 @@ def redirect_if_invalid_state(required_step: int) -> bool:
     
     if not is_valid:
         st.warning(f"Please complete the previous steps first.")
-        if st.button(f"← Go to {redirect_step}"):
+        if st.button(f"Go to {redirect_step}", icon=":material/arrow_back:"):
             go_to_step(redirect_step)
             st.rerun()
         return False
@@ -705,7 +1225,7 @@ def render_multi_step1_upload():
             
             if file_state.is_uploaded and file_state.cleaned_df is not None:
                 # File already uploaded - show status and clear button
-                st.success(f"✓ {file_state.filename}")
+                st.success(f"{file_state.filename}")
                 st.write(f"Rows: {len(file_state.cleaned_df):,}")
                 
                 if st.button(f"Clear", key=f"clear_file_{file_num}"):
@@ -736,12 +1256,12 @@ def render_multi_step1_upload():
                             workflow_state.files[i].raw_file_bytes = file_bytes
                         st.rerun()
                     except Exception as e:
-                        st.error(f"❌ Error: {e}")
+                        st.error(f"Error: {e}")
     
     st.divider()
     
     # Display upload summary and status
-    st.subheader("📊 Upload Summary")
+    st.subheader("Upload Summary")
     
     # Count uploaded files
     uploaded_count = sum(1 for f in workflow_state.files if f.is_uploaded)
@@ -759,14 +1279,14 @@ def render_multi_step1_upload():
         if file_state.is_uploaded and file_state.cleaned_df is not None:
             summary_data.append({
                 "File": summary_labels[i],
-                "Status": "✓ Uploaded",
+                "Status": "Uploaded",
                 "Filename": file_state.filename,
                 "Rows": f"{len(file_state.cleaned_df):,}"
             })
         else:
             summary_data.append({
                 "File": summary_labels[i],
-                "Status": "⏳ Pending",
+                "Status": ":material/pending: Pending",
                 "Filename": "—",
                 "Rows": "—"
             })
@@ -777,9 +1297,9 @@ def render_multi_step1_upload():
     
     # Show progress message
     if uploaded_count == 5:
-        st.success(f"✓ All {uploaded_count} files uploaded! Ready to proceed.")
+        st.success(f"All {uploaded_count} files uploaded! Ready to proceed.")
     else:
-        st.info(f"📁 {uploaded_count}/5 files uploaded. Please upload all 5 files to continue.")
+        st.info(f"{uploaded_count}/5 files uploaded. Please upload all 5 files to continue.")
     
     st.divider()
     
@@ -787,7 +1307,7 @@ def render_multi_step1_upload():
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        if st.button("← Back to Home", use_container_width=True):
+        if st.button("Back to Home", icon=":material/arrow_back:", use_container_width=True):
             st.session_state.workflow_mode = None
             st.rerun()
     
@@ -796,7 +1316,7 @@ def render_multi_step1_upload():
         next_disabled = uploaded_count < 5
         
         if st.button(
-            "Next → Step 2: Clean Bad Data",
+            "Step 2: Clean Bad Data", icon=":material/arrow_forward:",
             type="primary",
             use_container_width=True,
             disabled=next_disabled
@@ -841,7 +1361,7 @@ def render_multi_step2_clean():
     
     if workflow_state is None:
         st.warning("Please complete Step 1 (Upload 5 Files) first.")
-        if st.button("← Go to Step 1"):
+        if st.button("Go to Step 1", icon=":material/arrow_back:"):
             go_to_step("1. Upload 5 Files")
             st.rerun()
         return
@@ -850,7 +1370,7 @@ def render_multi_step2_clean():
     uploaded_count = sum(1 for f in workflow_state.files if f.is_uploaded)
     if uploaded_count < 5:
         st.warning(f"Only {uploaded_count}/5 files uploaded. Please complete Step 1 first.")
-        if st.button("← Go to Step 1"):
+        if st.button("Go to Step 1", icon=":material/arrow_back:"):
             go_to_step("1. Upload 5 Files")
             st.rerun()
         return
@@ -858,7 +1378,7 @@ def render_multi_step2_clean():
     mapping = workflow_state.column_mapping
     
     # Display current file status
-    st.subheader("📁 Files to Clean")
+    st.subheader("Files to Clean")
     
     # Build summary of files before cleaning
     before_data = []
@@ -915,7 +1435,7 @@ def render_multi_step2_clean():
         ]
 
         # Full-width progress display
-        st.subheader("🧹 Cleaning all 5 files...")
+        st.subheader("Cleaning all 5 files...")
         progress_bar = st.progress(0)
         status_placeholder = st.empty()
 
@@ -933,18 +1453,18 @@ def render_multi_step2_clean():
             with status_placeholder.container():
                 for i, s in enumerate(cleaning_steps):
                     if i < step_idx:
-                        st.write(f"✅ {s}")
+                        st.write(f":material/check_circle: {s}")
                     elif i == step_idx:
-                        st.write(f"⏳ {s}...")
+                        st.write(f":material/pending: {s}...")
                     else:
-                        st.write(f"⬜ {s}")
+                        st.write(f":material/radio_button_unchecked: {s}")
             time.sleep(0.05)
 
         # Show initial state
         with status_placeholder.container():
-            st.write(f"⏳ {cleaning_steps[0]}...")
+            st.write(f":material/pending: {cleaning_steps[0]}...")
             for s in cleaning_steps[1:]:
-                st.write(f"⬜ {s}")
+                st.write(f":material/radio_button_unchecked: {s}")
 
         # 0. Prepare: File 1 only — highlight detection + remove highlighted rows; all 5 — filter to required columns
         update_progress(0, cleaning_steps[0])
@@ -1105,16 +1625,16 @@ def render_multi_step2_clean():
     # Show Apply Cleaning button only if not done and not currently in progress
     cleaning_in_progress = st.session_state.get('do_multi_cleaning', False)
     if not cleaning_done and not cleaning_in_progress:
-        if st.button("🧹 Apply Cleaning to All Files", type="primary"):
+        if st.button("Apply Cleaning to All Files", type="primary", icon=":material/cleaning_services:"):
             st.session_state.do_multi_cleaning = True
             st.rerun()
     
     # Display results if cleaning has been done (Requirement 3.2, 3.5)
     if cleaning_done:
-        st.success("✅ Cleaning complete for all 5 files!")
+        st.success("Cleaning complete for all 5 files!")
         
         st.divider()
-        st.subheader("📊 Cleaning Results Summary")
+        st.subheader("Cleaning Results Summary")
         
         # Build summary table with before/after counts for all 5 files (Requirement 3.5)
         summary_data = []
@@ -1157,7 +1677,7 @@ def render_multi_step2_clean():
         
         # Show per-file removal details in expanders (Requirement 3.2)
         st.divider()
-        st.subheader("📋 Per-File Removal Details")
+        st.subheader("Per-File Removal Details")
         
         for i, file_state in enumerate(workflow_state.files):
             file_num = i + 1
@@ -1185,14 +1705,14 @@ def render_multi_step2_clean():
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        if st.button("← Back to Step 1", use_container_width=True):
+        if st.button("Back to Step 1", icon=":material/arrow_back:", use_container_width=True):
             go_to_step("1. Upload 5 Files")
             st.rerun()
     
     with col2:
         # Next button - only enabled when cleaning is done
         if st.button(
-            "Next → Step 3: TCPA DNC File",
+            "Step 3: TCPA DNC File", icon=":material/arrow_forward:",
             type="primary",
             use_container_width=True,
             disabled=not cleaning_done
@@ -1208,7 +1728,7 @@ def render_multi_step9_bad_states():
     workflow_state = st.session_state.multi_file_state
     if workflow_state is None:
         st.warning("Please complete Step 1 (Upload 5 Files) first.")
-        if st.button("← Go to Step 1"):
+        if st.button("Go to Step 1", icon=":material/arrow_back:"):
             go_to_step("1. Upload 5 Files")
             st.rerun()
         return
@@ -1225,7 +1745,7 @@ def render_multi_step9_bad_states():
     )
     if not dedupe_done:
         st.warning("Please complete Step 8 (Cross-File Dedupe) first.")
-        if st.button("← Go to Step 8"):
+        if st.button("Go to Step 8", icon=":material/arrow_back:"):
             go_to_step("8. Cross-File Dedupe")
             st.rerun()
         return
@@ -1271,7 +1791,7 @@ def render_multi_step9_bad_states():
         bad_states |= {'AZ', 'DE', 'TX'}
     
     if bad_states_done:
-        st.success("✅ Bad states removal complete for all 5 files!")
+        st.success("Bad states removal complete for all 5 files!")
         summary_data = []
         for i, file_state in enumerate(workflow_state.files):
             sr = file_state.step_results.get(9)
@@ -1288,18 +1808,18 @@ def render_multi_step9_bad_states():
         st.divider()
         col1, col2 = st.columns([1, 1])
         with col1:
-            if st.button("← Back to Step 8", use_container_width=True):
+            if st.button("Back to Step 8", icon=":material/arrow_back:", use_container_width=True):
                 go_to_step("8. Cross-File Dedupe")
                 st.rerun()
         with col2:
-            if st.button("Next → Step 10: Clean against Billing", type="primary", use_container_width=True):
+            if st.button("Next: Step 10: Clean against Billing", icon=":material/arrow_forward:", type="primary", use_container_width=True):
                 go_to_step("10. Clean against Billing")
                 st.rerun()
         return
     
     if not bad_states:
         st.warning("Add states to remove: upload a Bad States file and/or leave \"Always remove AZ, DE, and TX\" checked.")
-        if st.button("← Back to Step 8"):
+        if st.button("Back to Step 8", icon=":material/arrow_back:"):
             go_to_step("8. Cross-File Dedupe")
             st.rerun()
         return
@@ -1332,7 +1852,7 @@ def render_multi_step9_bad_states():
         st.rerun()
     
     st.divider()
-    if st.button("← Back to Step 8", use_container_width=True):
+    if st.button("Back to Step 8", icon=":material/arrow_back:", use_container_width=True):
         go_to_step("8. Cross-File Dedupe")
         st.rerun()
 
@@ -1348,7 +1868,7 @@ def render_multi_step10_billing():
     workflow_state = st.session_state.multi_file_state
     if workflow_state is None:
         st.warning("Please complete Step 1 (Upload 5 Files) first.")
-        if st.button("← Go to Step 1"):
+        if st.button("Go to Step 1", icon=":material/arrow_back:"):
             go_to_step("1. Upload 5 Files")
             st.rerun()
         return
@@ -1361,7 +1881,7 @@ def render_multi_step10_billing():
     )
     if not bad_states_done:
         st.warning("Please complete Step 9 (Bad States) first.")
-        if st.button("← Go to Step 9"):
+        if st.button("Go to Step 9", icon=":material/arrow_back:"):
             go_to_step("9. Bad States")
             st.rerun()
         return
@@ -1377,7 +1897,7 @@ def render_multi_step10_billing():
     )
     
     if billing_done:
-        st.success("✅ Billing deduplication complete!")
+        st.success("Billing deduplication complete!")
         sr = workflow_state.files[0].step_results.get(10)
         if sr:
             col1, col2, col3 = st.columns(3)
@@ -1388,7 +1908,7 @@ def render_multi_step10_billing():
         
         # Download section: File 1 all removed rows (all steps combined)
         st.divider()
-        st.subheader("📥 File 1 — All Removed Rows (All Steps)")
+        st.subheader("File 1 — All Removed Rows (All Steps)")
         st.write("Download all rows removed from File 1 across every step, with Step and Reason columns.")
         
         cache_key_f1_all_removed = "excel_cache_multi_step10_f1_all_removed"
@@ -1401,7 +1921,7 @@ def render_multi_step10_billing():
                         file1_state.removed_df, mapping
                     )
             st.download_button(
-                label="📥 Download File 1 All Removed Rows",
+                label="Download File 1 All Removed Rows",
                 data=st.session_state[cache_key_f1_all_removed],
                 file_name="file1_all_removed_rows.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1414,11 +1934,11 @@ def render_multi_step10_billing():
         st.divider()
         col1, col2 = st.columns([1, 1])
         with col1:
-            if st.button("← Back to Step 9", use_container_width=True):
+            if st.button("Back to Step 9", icon=":material/arrow_back:", use_container_width=True):
                 go_to_step("9. Bad States")
                 st.rerun()
         with col2:
-            if st.button("Next → Final Download", type="primary", use_container_width=True):
+            if st.button("Next: Final Download", icon=":material/arrow_forward:", type="primary", use_container_width=True):
                 go_to_step("Final Download")
                 st.rerun()
         return
@@ -1452,9 +1972,9 @@ def render_multi_step10_billing():
     
     # Show status of uploads
     if billing_file_1:
-        st.caption(f"✓ Billing File 1: {billing_file_1.name}")
+        st.caption(f":material/check_circle: Billing File 1: {billing_file_1.name}")
     if billing_file_2:
-        st.caption(f"✓ Billing File 2: {billing_file_2.name}")
+        st.caption(f":material/check_circle: Billing File 2: {billing_file_2.name}")
     
     st.divider()
     
@@ -1522,7 +2042,7 @@ def render_multi_step10_billing():
     st.divider()
     col1, col2 = st.columns([1, 1])
     with col1:
-        if st.button("← Back to Step 9", use_container_width=True):
+        if st.button("Back to Step 9", icon=":material/arrow_back:", use_container_width=True):
             go_to_step("9. Bad States")
             st.rerun()
 
@@ -1547,7 +2067,7 @@ def render_multi_step3_dnc():
     
     if workflow_state is None:
         st.warning("Please complete Step 1 (Upload 5 Files) first.")
-        if st.button("← Go to Step 1"):
+        if st.button("Go to Step 1", icon=":material/arrow_back:"):
             go_to_step("1. Upload 5 Files")
             st.rerun()
         return
@@ -1561,7 +2081,7 @@ def render_multi_step3_dnc():
     
     if not cleaning_done:
         st.warning("Please complete Step 2 (Clean Bad Data) first.")
-        if st.button("← Go to Step 2"):
+        if st.button("Go to Step 2", icon=":material/arrow_back:"):
             go_to_step("2. Clean Bad Data")
             st.rerun()
         return
@@ -1589,20 +2109,20 @@ def render_multi_step3_dnc():
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            status_text.write(f"📂 Reading DNC file ({file_size_mb:.1f} MB)...")
+            status_text.write(f"Reading DNC file ({file_size_mb:.1f} MB)...")
             progress_bar.progress(20)
             
             # Read specifically from Sheet1 (2)
             xl = pd.ExcelFile(BytesIO(file_bytes))
             sheet_name = 'Sheet1 (2)' if 'Sheet1 (2)' in xl.sheet_names else xl.sheet_names[-1]
             
-            status_text.write(f"⏳ Parsing sheet '{sheet_name}'...")
+            status_text.write(f":material/pending: Parsing sheet '{sheet_name}'...")
             progress_bar.progress(50)
             
             df = pd.read_excel(xl, sheet_name=sheet_name)
             
             progress_bar.progress(80)
-            status_text.write("📊 Processing DNC data...")
+            status_text.write("Processing DNC data...")
             
             # Store in workflow state
             workflow_state.tcpa_dnc_data = df
@@ -1614,7 +2134,7 @@ def render_multi_step3_dnc():
             
             # Preview what was loaded
             dnc_phones, dnc_area_codes, dnc_names = load_ld_dnc(df)
-            st.success(f"✓ Loaded DNC file from sheet '{sheet_name}'")
+            st.success(f"Loaded DNC file from sheet '{sheet_name}'")
             st.write(f"- {len(dnc_phones):,} phone numbers")
             st.write(f"- {len(dnc_area_codes)} area codes: {', '.join(sorted(dnc_area_codes))}")
             st.write(f"- {len(dnc_names):,} names")
@@ -1624,7 +2144,7 @@ def render_multi_step3_dnc():
     # Show loaded status if already loaded
     elif workflow_state.tcpa_dnc_data is not None:
         dnc_phones, dnc_area_codes, dnc_names = load_ld_dnc(workflow_state.tcpa_dnc_data)
-        st.success(f"✓ DNC file loaded")
+        st.success(f"DNC file loaded")
         st.write(f"- {len(dnc_phones):,} phone numbers")
         st.write(f"- {len(dnc_area_codes)} area codes")
         st.write(f"- {len(dnc_names):,} names")
@@ -1632,7 +2152,7 @@ def render_multi_step3_dnc():
     st.divider()
     
     # Display current file status
-    st.subheader("📁 Files to Filter")
+    st.subheader("Files to Filter")
     
     # Build summary of files before DNC filtering
     before_data = []
@@ -1672,7 +2192,7 @@ def render_multi_step3_dnc():
         ]
         
         # Full-width progress display
-        st.subheader("🔍 DNC Filtering all 5 files...")
+        st.subheader("DNC Filtering all 5 files...")
         progress_bar = st.progress(0)
         status_placeholder = st.empty()
         
@@ -1690,18 +2210,18 @@ def render_multi_step3_dnc():
             with status_placeholder.container():
                 for i, s in enumerate(filtering_steps):
                     if i < step_idx:
-                        st.write(f"✅ {s}")
+                        st.write(f":material/check_circle: {s}")
                     elif i == step_idx:
-                        st.write(f"⏳ {s}...")
+                        st.write(f":material/pending: {s}...")
                     else:
-                        st.write(f"⬜ {s}")
+                        st.write(f":material/radio_button_unchecked: {s}")
             time.sleep(0.05)
         
         # Show initial state
         with status_placeholder.container():
-            st.write(f"⏳ {filtering_steps[0]}...")
+            st.write(f":material/pending: {filtering_steps[0]}...")
             for s in filtering_steps[1:]:
-                st.write(f"⬜ {s}")
+                st.write(f":material/radio_button_unchecked: {s}")
         
         # 1. Filter by DNC phone numbers (Requirement 3.4 - reuse existing logic)
         update_progress(0, filtering_steps[0])
@@ -1760,16 +2280,16 @@ def render_multi_step3_dnc():
     # Show Run DNC button only if DNC file is loaded, not done, and not currently in progress
     dnc_in_progress = st.session_state.get('do_multi_dnc', False)
     if workflow_state.tcpa_dnc_data is not None and not dnc_done and not dnc_in_progress:
-        if st.button("🔍 Run DNC Filter on All Files", type="primary"):
+        if st.button("Run DNC Filter on All Files", type="primary", icon=":material/filter_alt:"):
             st.session_state.do_multi_dnc = True
             st.rerun()
     
     # Display results if DNC filtering has been done (Requirement 3.2)
     if dnc_done:
-        st.success("✅ DNC filtering complete for all 5 files!")
+        st.success("DNC filtering complete for all 5 files!")
         
         st.divider()
-        st.subheader("📊 DNC Filtering Results Summary")
+        st.subheader("DNC Filtering Results Summary")
         
         # Build summary table with before/after counts for all 5 files
         summary_data = []
@@ -1812,7 +2332,7 @@ def render_multi_step3_dnc():
         
         # Show per-file removal details in expanders (Requirement 3.2)
         st.divider()
-        st.subheader("📋 Per-File Removal Details")
+        st.subheader("Per-File Removal Details")
         
         for i, file_state in enumerate(workflow_state.files):
             file_num = i + 1
@@ -1840,14 +2360,14 @@ def render_multi_step3_dnc():
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        if st.button("← Back to Step 2", use_container_width=True):
+        if st.button("Back to Step 2", icon=":material/arrow_back:", use_container_width=True):
             go_to_step("2. Clean Bad Data")
             st.rerun()
     
     with col2:
         # Next button - only enabled when DNC filtering is done
         if st.button(
-            "Next → Step 4: Zip Code Removal",
+            "Step 4: Zip Code Removal", icon=":material/arrow_forward:",
             type="primary",
             use_container_width=True,
             disabled=not dnc_done
@@ -1874,7 +2394,7 @@ def render_multi_step4_zipcode():
     
     if workflow_state is None:
         st.warning("Please complete Step 1 (Upload 5 Files) first.")
-        if st.button("← Go to Step 1"):
+        if st.button("Go to Step 1", icon=":material/arrow_back:"):
             go_to_step("1. Upload 5 Files")
             st.rerun()
         return
@@ -1888,7 +2408,7 @@ def render_multi_step4_zipcode():
     
     if not dnc_done:
         st.warning("Please complete Step 3 (TCPA DNC File) first.")
-        if st.button("← Go to Step 3"):
+        if st.button("Go to Step 3", icon=":material/arrow_back:"):
             go_to_step("3. TCPA DNC File")
             st.rerun()
         return
@@ -1914,16 +2434,16 @@ def render_multi_step4_zipcode():
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            status_text.write(f"📂 Reading Zip Codes file ({file_size_mb:.1f} MB)...")
+            status_text.write(f"Reading Zip Codes file ({file_size_mb:.1f} MB)...")
             progress_bar.progress(20)
             
-            status_text.write("⏳ Parsing zip codes...")
+            status_text.write(":material/pending: Parsing zip codes...")
             progress_bar.progress(50)
             
             df = load_file_with_progress(file_bytes, zips_file.name)
             
             progress_bar.progress(80)
-            status_text.write("📊 Processing zip code data...")
+            status_text.write("Processing zip code data...")
             
             # Store in workflow state
             workflow_state.tcpa_zips_data = df
@@ -1935,19 +2455,19 @@ def render_multi_step4_zipcode():
             
             # Preview what was loaded
             tcpa_zips = load_tcpa_zipcodes(df)
-            st.success(f"✓ Loaded {len(tcpa_zips):,} zip codes")
+            st.success(f"Loaded {len(tcpa_zips):,} zip codes")
         except Exception as e:
             st.error(f"Error loading file: {e}")
     
     # Show loaded status if already loaded
     elif workflow_state.tcpa_zips_data is not None:
         tcpa_zips = load_tcpa_zipcodes(workflow_state.tcpa_zips_data)
-        st.success(f"✓ {len(tcpa_zips):,} zip codes loaded")
+        st.success(f"{len(tcpa_zips):,} zip codes loaded")
     
     st.divider()
     
     # Display current file status
-    st.subheader("📁 Files to Filter")
+    st.subheader("Files to Filter")
     
     # Build summary of files before zip code filtering
     before_data = []
@@ -1985,7 +2505,7 @@ def render_multi_step4_zipcode():
         ]
         
         # Full-width progress display
-        st.subheader("🔍 Zip Code Filtering all 5 files...")
+        st.subheader("Zip Code Filtering all 5 files...")
         progress_bar = st.progress(0)
         status_placeholder = st.empty()
         
@@ -2003,16 +2523,16 @@ def render_multi_step4_zipcode():
             with status_placeholder.container():
                 for i, s in enumerate(filtering_steps):
                     if i < step_idx:
-                        st.write(f"✅ {s}")
+                        st.write(f":material/check_circle: {s}")
                     elif i == step_idx:
-                        st.write(f"⏳ {s}...")
+                        st.write(f":material/pending: {s}...")
                     else:
-                        st.write(f"⬜ {s}")
+                        st.write(f":material/radio_button_unchecked: {s}")
             time.sleep(0.05)
         
         # Show initial state
         with status_placeholder.container():
-            st.write(f"⏳ {filtering_steps[0]}...")
+            st.write(f":material/pending: {filtering_steps[0]}...")
         
         # 1. Filter by TCPA zip codes (Requirement 3.4 - reuse existing logic)
         update_progress(0, filtering_steps[0])
@@ -2047,16 +2567,16 @@ def render_multi_step4_zipcode():
     # Show Run Zip Filter button only if zip file is loaded, not done, and not currently in progress
     zip_in_progress = st.session_state.get('do_multi_zip', False)
     if workflow_state.tcpa_zips_data is not None and not zip_done and not zip_in_progress:
-        if st.button("🔍 Run Zip Code Filter on All Files", type="primary"):
+        if st.button("Run Zip Code Filter on All Files", type="primary", icon=":material/filter_alt:"):
             st.session_state.do_multi_zip = True
             st.rerun()
     
     # Display results if zip code filtering has been done (Requirement 3.2)
     if zip_done:
-        st.success("✅ Zip code filtering complete for all 5 files!")
+        st.success("Zip code filtering complete for all 5 files!")
         
         st.divider()
-        st.subheader("📊 Zip Code Filtering Results Summary")
+        st.subheader("Zip Code Filtering Results Summary")
         
         # Build summary table with before/after counts for all 5 files
         summary_data = []
@@ -2099,7 +2619,7 @@ def render_multi_step4_zipcode():
         
         # Show per-file removal details in expanders (Requirement 3.2)
         st.divider()
-        st.subheader("📋 Per-File Removal Details")
+        st.subheader("Per-File Removal Details")
         
         for i, file_state in enumerate(workflow_state.files):
             file_num = i + 1
@@ -2127,14 +2647,14 @@ def render_multi_step4_zipcode():
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        if st.button("← Back to Step 3", use_container_width=True):
+        if st.button("Back to Step 3", icon=":material/arrow_back:", use_container_width=True):
             go_to_step("3. TCPA DNC File")
             st.rerun()
     
     with col2:
         # Next button - only enabled when zip code filtering is done
         if st.button(
-            "Next → Step 5: Phone Number Removal",
+            "Step 5: Phone Number Removal", icon=":material/arrow_forward:",
             type="primary",
             use_container_width=True,
             disabled=not zip_done
@@ -2162,7 +2682,7 @@ def render_multi_step5_phones():
     
     if workflow_state is None:
         st.warning("Please complete Step 1 (Upload 5 Files) first.")
-        if st.button("← Go to Step 1"):
+        if st.button("Go to Step 1", icon=":material/arrow_back:"):
             go_to_step("1. Upload 5 Files")
             st.rerun()
         return
@@ -2176,7 +2696,7 @@ def render_multi_step5_phones():
     
     if not zip_done:
         st.warning("Please complete Step 4 (Zip Code Removal) first.")
-        if st.button("← Go to Step 4"):
+        if st.button("Go to Step 4", icon=":material/arrow_back:"):
             go_to_step("4. Zip Code Removal")
             st.rerun()
         return
@@ -2203,16 +2723,16 @@ def render_multi_step5_phones():
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            status_text.write(f"📂 Reading Phones file ({file_size_mb:.1f} MB)...")
+            status_text.write(f"Reading Phones file ({file_size_mb:.1f} MB)...")
             progress_bar.progress(20)
             
-            status_text.write("⏳ Parsing phone numbers...")
+            status_text.write(":material/pending: Parsing phone numbers...")
             progress_bar.progress(50)
             
             df = load_file_with_progress(file_bytes, phones_file.name)
             
             progress_bar.progress(80)
-            status_text.write("📊 Processing phone data...")
+            status_text.write("Processing phone data...")
             
             # Store in workflow state
             workflow_state.tcpa_phones_data = df
@@ -2224,19 +2744,19 @@ def render_multi_step5_phones():
             
             # Preview what was loaded
             tcpa_phones = load_tcpa_phones(df)
-            st.success(f"✓ Loaded {len(tcpa_phones):,} phone numbers")
+            st.success(f"Loaded {len(tcpa_phones):,} phone numbers")
         except Exception as e:
             st.error(f"Error loading file: {e}")
     
     # Show loaded status if already loaded
     elif workflow_state.tcpa_phones_data is not None:
         tcpa_phones = load_tcpa_phones(workflow_state.tcpa_phones_data)
-        st.success(f"✓ {len(tcpa_phones):,} phone numbers loaded")
+        st.success(f"{len(tcpa_phones):,} phone numbers loaded")
     
     st.divider()
     
     # Display current file status
-    st.subheader("📁 Files to Filter")
+    st.subheader("Files to Filter")
     
     # Build summary of files before phone filtering
     before_data = []
@@ -2275,7 +2795,7 @@ def render_multi_step5_phones():
         ]
         
         # Full-width progress display
-        st.subheader("🔍 Phone Filtering all 5 files...")
+        st.subheader("Phone Filtering all 5 files...")
         progress_bar = st.progress(0)
         status_placeholder = st.empty()
         
@@ -2293,18 +2813,18 @@ def render_multi_step5_phones():
             with status_placeholder.container():
                 for i, s in enumerate(filtering_steps):
                     if i < step_idx:
-                        st.write(f"✅ {s}")
+                        st.write(f":material/check_circle: {s}")
                     elif i == step_idx:
-                        st.write(f"⏳ {s}...")
+                        st.write(f":material/pending: {s}...")
                     else:
-                        st.write(f"⬜ {s}")
+                        st.write(f":material/radio_button_unchecked: {s}")
             time.sleep(0.05)
         
         # Show initial state
         with status_placeholder.container():
-            st.write(f"⏳ {filtering_steps[0]}...")
+            st.write(f":material/pending: {filtering_steps[0]}...")
             for s in filtering_steps[1:]:
-                st.write(f"⬜ {s}")
+                st.write(f":material/radio_button_unchecked: {s}")
         
         # 1. Filter by TCPA phone numbers (Requirement 3.4 - reuse existing logic)
         update_progress(0, filtering_steps[0])
@@ -2351,16 +2871,16 @@ def render_multi_step5_phones():
     # Show Run Phone Filter button only if phone file is loaded, not done, and not currently in progress
     phone_in_progress = st.session_state.get('do_multi_phone', False)
     if workflow_state.tcpa_phones_data is not None and not phone_done and not phone_in_progress:
-        if st.button("🔍 Run Phone Filter on All Files", type="primary"):
+        if st.button("Run Phone Filter on All Files", type="primary", icon=":material/filter_alt:"):
             st.session_state.do_multi_phone = True
             st.rerun()
     
     # Display results if phone filtering has been done (Requirement 3.2)
     if phone_done:
-        st.success("✅ Phone filtering complete for all 5 files!")
+        st.success("Phone filtering complete for all 5 files!")
         
         st.divider()
-        st.subheader("📊 Phone Filtering Results Summary")
+        st.subheader("Phone Filtering Results Summary")
         
         # Build summary table with before/after counts for all 5 files
         summary_data = []
@@ -2403,7 +2923,7 @@ def render_multi_step5_phones():
         
         # Show per-file removal details in expanders (Requirement 3.2)
         st.divider()
-        st.subheader("📋 Per-File Removal Details")
+        st.subheader("Per-File Removal Details")
         
         for i, file_state in enumerate(workflow_state.files):
             file_num = i + 1
@@ -2431,14 +2951,14 @@ def render_multi_step5_phones():
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        if st.button("← Back to Step 4", use_container_width=True):
+        if st.button("Back to Step 4", icon=":material/arrow_back:", use_container_width=True):
             go_to_step("4. Zip Code Removal")
             st.rerun()
     
     with col2:
         # Next button - only enabled when phone filtering is done
         if st.button(
-            "Next → Step 6: Download Cleaned Files",
+            "Step 6: Download Cleaned Files", icon=":material/arrow_forward:",
             type="primary",
             use_container_width=True,
             disabled=not phone_done
@@ -2459,7 +2979,7 @@ def render_multi_step6_download():
     
     if workflow_state is None:
         st.warning("Please complete Step 1 (Upload 5 Files) first.")
-        if st.button("← Go to Step 1"):
+        if st.button("Go to Step 1", icon=":material/arrow_back:"):
             go_to_step("1. Upload 5 Files")
             st.rerun()
         return
@@ -2473,7 +2993,7 @@ def render_multi_step6_download():
     
     if not phone_done:
         st.warning("Please complete Step 5 (Phone Number Removal) first.")
-        if st.button("← Go to Step 5"):
+        if st.button("Go to Step 5", icon=":material/arrow_back:"):
             go_to_step("5. Phone Number Removal")
             st.rerun()
         return
@@ -2483,7 +3003,7 @@ def render_multi_step6_download():
     st.divider()
     
     # Download All as ZIP section (Requirement 4.4, 4.5)
-    st.subheader("📦 Download All Files as ZIP")
+    st.subheader("Download All Files as ZIP")
     
     # Build the files dictionary for ZIP export (original name + " (CLEANED)" / " (REMOVED)")
     def _zip_name(original_filename: str, suffix: str, file_num: int) -> str:
@@ -2514,7 +3034,7 @@ def render_multi_step6_download():
                     st.session_state[cache_key_zip] = export_to_zip(zip_files)
             
             st.download_button(
-                label="📥 Download All as ZIP",
+                label="Download All as ZIP",
                 data=st.session_state[cache_key_zip],
                 file_name="cleaned_files.zip",
                 mime="application/zip",
@@ -2532,13 +3052,13 @@ def render_multi_step6_download():
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        if st.button("← Back to Step 5", use_container_width=True):
+        if st.button("Back to Step 5", icon=":material/arrow_back:", use_container_width=True):
             go_to_step("5. Phone Number Removal")
             st.rerun()
     
     with col2:
         if st.button(
-            "Next → Step 7: Master Phone Suppression",
+            "Step 7: Master Phone Suppression", icon=":material/arrow_forward:",
             type="primary",
             use_container_width=True
         ):
@@ -2569,7 +3089,7 @@ def render_multi_step7_master_suppression():
     
     if workflow_state is None:
         st.warning("Please complete Step 1 (Upload 5 Files) first.")
-        if st.button("← Go to Step 1"):
+        if st.button("Go to Step 1", icon=":material/arrow_back:"):
             go_to_step("1. Upload 5 Files")
             st.rerun()
         return
@@ -2583,7 +3103,7 @@ def render_multi_step7_master_suppression():
     
     if not phone_done:
         st.warning("Please complete Step 5 (Phone Number Removal) first.")
-        if st.button("← Go to Step 5"):
+        if st.button("Go to Step 5", icon=":material/arrow_back:"):
             go_to_step("5. Phone Number Removal")
             st.rerun()
         return
@@ -2596,7 +3116,7 @@ def render_multi_step7_master_suppression():
     st.divider()
     
     # File uploader for master phone list (Requirement 5.1)
-    st.subheader("📤 Upload Master Phone List")
+    st.subheader("Upload Master Phone List")
     
     master_file = st.file_uploader(
         "Upload Master Phone List (Excel with multiple tabs)",
@@ -2614,17 +3134,17 @@ def render_multi_step7_master_suppression():
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            status_text.write(f"📂 Reading Master Phone List ({file_size_mb:.1f} MB)...")
+            status_text.write(f"Reading Master Phone List ({file_size_mb:.1f} MB)...")
             progress_bar.progress(20)
             
-            status_text.write("⏳ Extracting phone numbers from all tabs...")
+            status_text.write(":material/pending: Extracting phone numbers from all tabs...")
             progress_bar.progress(50)
             
             # Extract phones from all tabs (Requirement 5.2, 5.3)
             master_phones = load_phones_from_all_tabs(BytesIO(file_bytes))
             
             progress_bar.progress(80)
-            status_text.write("📊 Processing phone data...")
+            status_text.write("Processing phone data...")
             
             # Store in workflow state
             workflow_state.master_phone_list = master_phones
@@ -2636,10 +3156,10 @@ def render_multi_step7_master_suppression():
             
             # Display count of extracted phone numbers (Requirement 5.3)
             if len(master_phones) > 0:
-                st.success(f"✓ Extracted {len(master_phones):,} unique phone numbers from all tabs")
+                st.success(f"Extracted {len(master_phones):,} unique phone numbers from all tabs")
             else:
                 # Handle invalid data gracefully (Requirement 5.7)
-                st.warning("⚠️ No valid phone numbers found in the uploaded file. Please check the file format.")
+                st.warning("No valid phone numbers found in the uploaded file. Please check the file format.")
                 workflow_state.master_phone_list = None
                 
         except Exception as e:
@@ -2651,9 +3171,9 @@ def render_multi_step7_master_suppression():
     elif workflow_state.master_phone_list is not None:
         phone_count = len(workflow_state.master_phone_list)
         if phone_count > 0:
-            st.success(f"✓ {phone_count:,} unique phone numbers loaded from master list")
+            st.success(f"{phone_count:,} unique phone numbers loaded from master list")
         else:
-            st.warning("⚠️ Master phone list is empty. Please upload a new file.")
+            st.warning("Master phone list is empty. Please upload a new file.")
             # Allow re-upload by clearing the state
             if st.button("Clear and Re-upload"):
                 workflow_state.master_phone_list = None
@@ -2662,7 +3182,7 @@ def render_multi_step7_master_suppression():
     st.divider()
     
     # Display current file status
-    st.subheader("📁 Files to Filter")
+    st.subheader("Files to Filter")
     
     # Build summary of files before suppression
     before_data = []
@@ -2700,7 +3220,7 @@ def render_multi_step7_master_suppression():
             return
         
         # Full-width progress display
-        st.subheader("🔍 Applying Master Phone Suppression to all 5 files...")
+        st.subheader("Applying Master Phone Suppression to all 5 files...")
         progress_bar = st.progress(0)
         status_placeholder = st.empty()
         
@@ -2722,7 +3242,7 @@ def render_multi_step7_master_suppression():
             # Update progress
             progress_bar.progress((i + 1) / total_files)
             with status_placeholder.container():
-                st.write(f"⏳ Processing File {file_num}...")
+                st.write(f":material/pending: Processing File {file_num}...")
             
             # Skip files that aren't uploaded or don't have data
             if not file_state.is_uploaded or file_state.cleaned_df is None:
@@ -2769,7 +3289,7 @@ def render_multi_step7_master_suppression():
                 
             except Exception as e:
                 # Handle invalid data gracefully (Requirement 5.7)
-                st.warning(f"⚠️ Warning for File {file_num}: {e}")
+                st.warning(f"Warning for File {file_num}: {e}")
                 file_removal_summaries[i]['master_phone_match'] = 0
                 file_after_counts.append(before_count)
         
@@ -2792,16 +3312,16 @@ def render_multi_step7_master_suppression():
     # Show Apply Suppression button only if master phone list is loaded, not done, and not currently in progress
     suppression_in_progress = st.session_state.get('do_multi_suppression', False)
     if workflow_state.master_phone_list is not None and len(workflow_state.master_phone_list) > 0 and not suppression_done and not suppression_in_progress:
-        if st.button("🔍 Apply Suppression to All Files", type="primary"):
+        if st.button("Apply Suppression to All Files", type="primary", icon=":material/filter_alt:"):
             st.session_state.do_multi_suppression = True
             st.rerun()
     
     # Display results if suppression has been done (Requirement 5.5)
     if suppression_done:
-        st.success("✅ Master phone suppression complete for all 5 files!")
+        st.success("Master phone suppression complete for all 5 files!")
         
         st.divider()
-        st.subheader("📊 Suppression Results Summary")
+        st.subheader("Suppression Results Summary")
         
         # Build summary table with before/after counts for all 5 files
         summary_data = []
@@ -2844,7 +3364,7 @@ def render_multi_step7_master_suppression():
         
         # Show per-file removal details in expanders
         st.divider()
-        st.subheader("📋 Per-File Removal Details")
+        st.subheader("Per-File Removal Details")
         
         for i, file_state in enumerate(workflow_state.files):
             file_num = i + 1
@@ -2872,14 +3392,14 @@ def render_multi_step7_master_suppression():
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        if st.button("← Back to Step 6", use_container_width=True):
+        if st.button("Back to Step 6", icon=":material/arrow_back:", use_container_width=True):
             go_to_step("6. Download Cleaned Files")
             st.rerun()
     
     with col2:
         # Next button - only enabled when suppression is done
         if st.button(
-            "Next → Step 8: Cross-File Dedupe",
+            "Step 8: Cross-File Dedupe", icon=":material/arrow_forward:",
             type="primary",
             use_container_width=True,
             disabled=not suppression_done
@@ -2910,7 +3430,7 @@ def render_multi_step8_crossfile_dedupe():
     
     if workflow_state is None:
         st.warning("Please complete Step 1 (Upload 5 Files) first.")
-        if st.button("← Go to Step 1"):
+        if st.button("Go to Step 1", icon=":material/arrow_back:"):
             go_to_step("1. Upload 5 Files")
             st.rerun()
         return
@@ -2924,7 +3444,7 @@ def render_multi_step8_crossfile_dedupe():
     
     if not suppression_done:
         st.warning("Please complete Step 7 (Master Phone Suppression) first.")
-        if st.button("← Go to Step 7"):
+        if st.button("Go to Step 7", icon=":material/arrow_back:"):
             go_to_step("7. Master Phone Suppression")
             st.rerun()
         return
@@ -2937,7 +3457,7 @@ def render_multi_step8_crossfile_dedupe():
     st.divider()
     
     # Display current file status (Requirement 6.1, 6.7)
-    st.subheader("📁 Current Row Counts")
+    st.subheader("Current Row Counts")
     
     # Build summary of files before deduplication
     before_data = []
@@ -2969,7 +3489,7 @@ def render_multi_step8_crossfile_dedupe():
         st.session_state.do_multi_crossfile_dedupe = False
         
         # Full-width progress display
-        st.subheader("🔄 Running Cross-File Deduplication...")
+        st.subheader("Running Cross-File Deduplication...")
         progress_bar = st.progress(0)
         status_placeholder = st.empty()
         
@@ -2984,8 +3504,8 @@ def render_multi_step8_crossfile_dedupe():
         
         # File 1 keeps all rows (Requirement 6.2)
         with status_placeholder.container():
-            st.write("✅ File 1: Reference file (keeps all rows)")
-            st.write("⏳ Processing File 2...")
+            st.write(":material/check_circle: File 1: Reference file (keeps all rows)")
+            st.write(":material/pending: Processing File 2...")
         progress_bar.progress(10)
         
         # File 1 - no changes, just record the result
@@ -2995,8 +3515,8 @@ def render_multi_step8_crossfile_dedupe():
         
         # File 2: remove phones in File 1 (Requirement 6.3)
         with status_placeholder.container():
-            st.write("✅ File 1: Reference file (keeps all rows)")
-            st.write("⏳ Processing File 2: Removing phones in File 1...")
+            st.write(":material/check_circle: File 1: Reference file (keeps all rows)")
+            st.write(":material/pending: Processing File 2: Removing phones in File 1...")
         progress_bar.progress(25)
         
         file_state_2 = workflow_state.files[1]
@@ -3024,9 +3544,9 @@ def render_multi_step8_crossfile_dedupe():
         
         # File 3: remove phones in Files 1-2 (Requirement 6.4)
         with status_placeholder.container():
-            st.write("✅ File 1: Reference file (keeps all rows)")
-            st.write("✅ File 2: Deduped against File 1")
-            st.write("⏳ Processing File 3: Removing phones in Files 1-2...")
+            st.write(":material/check_circle: File 1: Reference file (keeps all rows)")
+            st.write(":material/check_circle: File 2: Deduped against File 1")
+            st.write(":material/pending: Processing File 3: Removing phones in Files 1-2...")
         progress_bar.progress(45)
         
         file_state_3 = workflow_state.files[2]
@@ -3054,10 +3574,10 @@ def render_multi_step8_crossfile_dedupe():
         
         # File 4: remove phones in Files 1-3 (Requirement 6.5)
         with status_placeholder.container():
-            st.write("✅ File 1: Reference file (keeps all rows)")
-            st.write("✅ File 2: Deduped against File 1")
-            st.write("✅ File 3: Deduped against Files 1-2")
-            st.write("⏳ Processing File 4: Removing phones in Files 1-3...")
+            st.write(":material/check_circle: File 1: Reference file (keeps all rows)")
+            st.write(":material/check_circle: File 2: Deduped against File 1")
+            st.write(":material/check_circle: File 3: Deduped against Files 1-2")
+            st.write(":material/pending: Processing File 4: Removing phones in Files 1-3...")
         progress_bar.progress(65)
         
         file_state_4 = workflow_state.files[3]
@@ -3089,11 +3609,11 @@ def render_multi_step8_crossfile_dedupe():
         
         # File 5: remove phones in Files 1-4 (Requirement 6.6)
         with status_placeholder.container():
-            st.write("✅ File 1: Reference file (keeps all rows)")
-            st.write("✅ File 2: Deduped against File 1")
-            st.write("✅ File 3: Deduped against Files 1-2")
-            st.write("✅ File 4: Deduped against Files 1-3")
-            st.write("⏳ Processing File 5: Removing phones in Files 1-4...")
+            st.write(":material/check_circle: File 1: Reference file (keeps all rows)")
+            st.write(":material/check_circle: File 2: Deduped against File 1")
+            st.write(":material/check_circle: File 3: Deduped against Files 1-2")
+            st.write(":material/check_circle: File 4: Deduped against Files 1-3")
+            st.write(":material/pending: Processing File 5: Removing phones in Files 1-4...")
         progress_bar.progress(85)
         
         file_state_5 = workflow_state.files[4]
@@ -3143,16 +3663,16 @@ def render_multi_step8_crossfile_dedupe():
     # Show Run Deduplication button only if not done and not currently in progress (Requirement 6.1)
     dedupe_in_progress = st.session_state.get('do_multi_crossfile_dedupe', False)
     if not dedupe_done and not dedupe_in_progress:
-        if st.button("🔄 Run Deduplication", type="primary"):
+        if st.button("Run Deduplication", type="primary", icon=":material/content_copy:"):
             st.session_state.do_multi_crossfile_dedupe = True
             st.rerun()
     
     # Display results if deduplication has been done (Requirement 6.7)
     if dedupe_done:
-        st.success("✅ Cross-file deduplication complete for all 5 files!")
+        st.success("Cross-file deduplication complete for all 5 files!")
         
         st.divider()
-        st.subheader("📊 Deduplication Results Summary")
+        st.subheader("Deduplication Results Summary")
         
         # Build summary table with before/after counts for all 5 files (Requirement 6.7)
         summary_data = []
@@ -3198,7 +3718,7 @@ def render_multi_step8_crossfile_dedupe():
         
         # Show per-file removal details in expanders
         st.divider()
-        st.subheader("📋 Per-File Deduplication Details")
+        st.subheader("Per-File Deduplication Details")
         
         for i, file_state in enumerate(workflow_state.files):
             file_num = i + 1
@@ -3230,14 +3750,14 @@ def render_multi_step8_crossfile_dedupe():
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        if st.button("← Back to Step 7", use_container_width=True):
+        if st.button("Back to Step 7", icon=":material/arrow_back:", use_container_width=True):
             go_to_step("7. Master Phone Suppression")
             st.rerun()
     
     with col2:
         # Next button - only enabled when deduplication is done
         if st.button(
-            "Next → Step 9: Bad States",
+            "Step 9: Bad States", icon=":material/arrow_forward:",
             type="primary",
             use_container_width=True,
             disabled=not dedupe_done
@@ -3255,7 +3775,7 @@ def render_multi_final_download():
     
     if workflow_state is None:
         st.warning("Please complete Step 1 (Upload 5 Files) first.")
-        if st.button("← Go to Step 1"):
+        if st.button("Go to Step 1", icon=":material/arrow_back:"):
             go_to_step("1. Upload 5 Files")
             st.rerun()
         return
@@ -3269,18 +3789,18 @@ def render_multi_final_download():
     
     if not billing_done:
         st.warning("Please complete Step 10 (Clean against Billing) first.")
-        if st.button("← Go to Step 10"):
+        if st.button("Go to Step 10", icon=":material/arrow_back:"):
             go_to_step("10. Clean against Billing")
             st.rerun()
         return
     
-    st.success("🎉 All processing complete! Your files are ready for download.")
+    st.success("All processing complete! Your files are ready for download.")
     st.write("Download your final cleaned files after all processing steps (cleaning, suppression, and deduplication) as a ZIP archive.")
     
     st.divider()
     
     # Download All as ZIP section (Requirement 7.2, 7.4)
-    st.subheader("📦 Download All Final Files as ZIP")
+    st.subheader("Download All Final Files as ZIP")
     
     # Build ZIP with final files at root and removed rows in removed_rows/ folder (with Reason column)
     def _final_zip_name(original_filename: str, file_num: int) -> str:
@@ -3321,7 +3841,7 @@ def render_multi_final_download():
 
         if final_count > 0:
             st.download_button(
-                label="📥 Download All as ZIP",
+                label="Download All as ZIP",
                 data=st.session_state[cache_key_zip],
                 file_name="final_files.zip",
                 mime="application/zip",
@@ -3344,12 +3864,12 @@ def render_multi_final_download():
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        if st.button("← Back to Step 10", use_container_width=True):
+        if st.button("Back to Step 10", icon=":material/arrow_back:", use_container_width=True):
             go_to_step("10. Clean against Billing")
             st.rerun()
     
     with col2:
-        if st.button("🏠 Return to Home", type="primary", use_container_width=True):
+        if st.button("Return to home", icon=":material/home:", type="primary", use_container_width=True):
             st.session_state.workflow_mode = None
             st.rerun()
 
@@ -3365,15 +3885,22 @@ def main():
     Requirements: 1.3, 1.4, 10.4
     """
     st.set_page_config(page_title="Refinance Data Cleansing", layout="wide")
-    
+
     init_session_state()
-    
+    ui_theme.inject_css()
+
     # Route based on workflow mode
     workflow_mode = st.session_state.workflow_mode
-    
+
     if workflow_mode is None:
         # Show home page when workflow_mode is not set (Requirement 1.1, 1.2)
         render_home_page()
+
+    elif workflow_mode == "fast_single":
+        render_fast_workflow(multi=False)
+
+    elif workflow_mode == "fast_multi":
+        render_fast_workflow(multi=True)
     
     elif workflow_mode == "single":
         # Single-file workflow (Requirement 1.3, 10.4)
@@ -3383,7 +3910,7 @@ def main():
         st.sidebar.title("Navigation")
         
         # Home button to return to workflow selection
-        if st.sidebar.button("🏠 Home", use_container_width=True):
+        if st.sidebar.button("Home", icon=":material/home:", use_container_width=True):
             st.session_state.workflow_mode = None
             st.rerun()
         
@@ -3429,7 +3956,7 @@ def main():
         st.sidebar.title("Navigation")
         
         # Home button to return to workflow selection
-        if st.sidebar.button("🏠 Home", use_container_width=True):
+        if st.sidebar.button("Home", icon=":material/home:", use_container_width=True):
             st.session_state.workflow_mode = None
             st.rerun()
         
@@ -3527,7 +4054,7 @@ def render_step1_upload():
             mapping.lead_id = 'Universal_LeadId'
             st.session_state.column_mapping = mapping
             
-            st.success(f"✓ Loaded {len(df)} rows, {len(df.columns)} columns")
+            st.success(f"Loaded {len(df)} rows, {len(df.columns)} columns")
             
             if dropped_cols:
                 st.info(f"Dropped {len(dropped_cols)} extra columns: {', '.join(dropped_cols)}")
@@ -3541,7 +4068,7 @@ def render_step1_upload():
         st.dataframe(st.session_state.raw_data.head(10))
         
         st.divider()
-        if st.button("Next → Step 2: Clean Bad Data", type="primary"):
+        if st.button("Next: Step 2: Clean Bad Data", icon=":material/arrow_forward:", type="primary"):
             go_to_step("2. Clean Bad Data")
             st.rerun()
 
@@ -3583,7 +4110,7 @@ def render_step2_clean():
         ]
         
         # Full-width progress display
-        st.subheader("🧹 Cleaning in progress...")
+        st.subheader("Cleaning in progress...")
         progress_bar = st.progress(0)
         status_placeholder = st.empty()
         
@@ -3597,19 +4124,19 @@ def render_step2_clean():
             with status_placeholder.container():
                 for i, s in enumerate(cleaning_steps):
                     if s in completed_steps:
-                        st.write(f"✅ {s}")
+                        st.write(f":material/check_circle: {s}")
                     elif i == step_idx + 1 and step_idx + 1 < len(cleaning_steps):
-                        st.write(f"⏳ {s}...")
+                        st.write(f":material/pending: {s}...")
                     elif i > step_idx:
-                        st.write(f"⬜ {s}")
+                        st.write(f":material/radio_button_unchecked: {s}")
             time.sleep(0.05)  # Force Streamlit to flush UI updates
         
         def show_status_with_detail(detail_msg):
             """Show the checklist with a detail message on the first (in-progress) step."""
             with status_placeholder.container():
-                st.write(f"⏳ {cleaning_steps[0]}... {detail_msg}")
+                st.write(f":material/pending: {cleaning_steps[0]}... {detail_msg}")
                 for s in cleaning_steps[1:]:
-                    st.write(f"⬜ {s}")
+                    st.write(f":material/radio_button_unchecked: {s}")
             time.sleep(0.01)
         
         # Show initial state
@@ -3619,7 +4146,7 @@ def render_step2_clean():
         if st.session_state.raw_file_ext in ['.xlsx', '.xls'] and st.session_state.raw_file_bytes:
             def highlight_progress(pct, msg):
                 progress_bar.progress(pct / 1000)  # Scale to 0-10% of total
-                show_status_with_detail(f"↳ {msg}")
+                show_status_with_detail(f"— {msg}")
             
             _, highlighted_cells = read_excel_with_highlights(
                 BytesIO(st.session_state.raw_file_bytes),
@@ -3785,7 +4312,7 @@ def render_step2_clean():
         
         # Next button
         st.divider()
-        if st.button("Next → Step 3: TCPA DNC File", type="primary"):
+        if st.button("Next: Step 3: TCPA DNC File", icon=":material/arrow_forward:", type="primary"):
             go_to_step("3. TCPA DNC File")
             st.rerun()
 
@@ -3837,7 +4364,7 @@ def render_step8_bad_states():
     
     if st.session_state.step4_result is None:
         st.warning("Please complete Step 7 (Cross-File Dedupe) first.")
-        if st.button("← Back to Step 7"):
+        if st.button("Back to Step 7", icon=":material/arrow_back:"):
             go_to_step("7. Cross-File Dedupe")
             st.rerun()
         return
@@ -3888,18 +4415,18 @@ def render_step8_bad_states():
         st.divider()
         col1, col2 = st.columns([1, 1])
         with col1:
-            if st.button("← Back to Step 7", use_container_width=True):
+            if st.button("Back to Step 7", icon=":material/arrow_back:", use_container_width=True):
                 go_to_step("7. Cross-File Dedupe")
                 st.rerun()
         with col2:
-            if st.button("Next → Step 9: Clean against Billing", type="primary", use_container_width=True):
+            if st.button("Next: Step 9: Clean against Billing", icon=":material/arrow_forward:", type="primary", use_container_width=True):
                 go_to_step("9. Clean against Billing")
                 st.rerun()
         return
     
     if not bad_states:
         st.warning("Add states to remove: upload a Bad States file and/or leave \"Always remove AZ, DE, and TX\" checked.")
-        if st.button("← Back to Step 7"):
+        if st.button("Back to Step 7", icon=":material/arrow_back:"):
             go_to_step("7. Cross-File Dedupe")
             st.rerun()
         return
@@ -3923,7 +4450,7 @@ def render_step8_bad_states():
         st.rerun()
     
     st.divider()
-    if st.button("← Back to Step 7", use_container_width=True):
+    if st.button("Back to Step 7", icon=":material/arrow_back:", use_container_width=True):
         go_to_step("7. Cross-File Dedupe")
         st.rerun()
 
@@ -3939,7 +4466,7 @@ def render_step9_billing():
     # Check prerequisite: Step 8 (Bad States) must be done
     if st.session_state.step1b_result is None:
         st.warning("Please complete Step 8 (Bad States) first.")
-        if st.button("← Back to Step 8"):
+        if st.button("Back to Step 8", icon=":material/arrow_back:"):
             go_to_step("8. Bad States")
             st.rerun()
         return
@@ -3950,7 +4477,7 @@ def render_step9_billing():
     # Check if billing step is already done
     if st.session_state.billing_result is not None:
         result = st.session_state.billing_result
-        st.success("✅ Billing deduplication complete!")
+        st.success("Billing deduplication complete!")
         st.divider()
         col1, col2, col3 = st.columns(3)
         col1.metric("Before", f"{result.before_count:,}")
@@ -3961,10 +4488,10 @@ def render_step9_billing():
             st.write(f"- {reason}: {count} rows")
         st.dataframe(result.cleaned_df.head(25))
         st.divider()
-        st.success("🎉 All steps complete! Your data has been fully cleaned.")
+        st.success("All steps complete! Your data has been fully cleaned.")
         
         # --- Final Download Section ---
-        st.subheader("📥 Final Downloads")
+        st.subheader("Final Downloads")
         
         # Download cleaned file
         cache_key_cleaned = "excel_cache_billing_cleaned"
@@ -3975,7 +4502,7 @@ def render_step9_billing():
                 with st.spinner("Preparing Excel file..."):
                     st.session_state[cache_key_cleaned] = export_to_excel(result.cleaned_df)
             st.download_button(
-                label="📥 Download Cleaned Excel",
+                label="Download Cleaned Excel",
                 data=st.session_state[cache_key_cleaned],
                 file_name="final_cleaned.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -4025,7 +4552,7 @@ def render_step9_billing():
             
             if st.session_state[cache_key_all_removed] is not None:
                 st.download_button(
-                    label="📥 Download All Removed Rows",
+                    label="Download All Removed Rows",
                     data=st.session_state[cache_key_all_removed],
                     file_name="all_removed_rows.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -4064,9 +4591,9 @@ def render_step9_billing():
     
     # Show status of uploads
     if billing_file_1:
-        st.caption(f"✓ Billing File 1: {billing_file_1.name}")
+        st.caption(f":material/check_circle: Billing File 1: {billing_file_1.name}")
     if billing_file_2:
-        st.caption(f"✓ Billing File 2: {billing_file_2.name}")
+        st.caption(f":material/check_circle: Billing File 2: {billing_file_2.name}")
     
     st.divider()
     
@@ -4109,7 +4636,7 @@ def render_step9_billing():
             st.rerun()
     
     st.divider()
-    if st.button("← Back to Step 8", use_container_width=True):
+    if st.button("Back to Step 8", icon=":material/arrow_back:", use_container_width=True):
         go_to_step("8. Bad States")
         st.rerun()
 
@@ -4144,20 +4671,20 @@ def render_step3_dnc():
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            status_text.write(f"📂 Reading DNC file ({file_size_mb:.1f} MB)...")
+            status_text.write(f"Reading DNC file ({file_size_mb:.1f} MB)...")
             progress_bar.progress(20)
             
             # Read specifically from Sheet1 (2)
             xl = pd.ExcelFile(BytesIO(file_bytes))
             sheet_name = 'Sheet1 (2)' if 'Sheet1 (2)' in xl.sheet_names else xl.sheet_names[-1]
             
-            status_text.write(f"⏳ Parsing sheet '{sheet_name}'...")
+            status_text.write(f":material/pending: Parsing sheet '{sheet_name}'...")
             progress_bar.progress(50)
             
             df = pd.read_excel(xl, sheet_name=sheet_name)
             
             progress_bar.progress(80)
-            status_text.write("📊 Processing DNC data...")
+            status_text.write("Processing DNC data...")
             
             st.session_state.tcpa_ld_dnc_data = df
             
@@ -4168,7 +4695,7 @@ def render_step3_dnc():
             
             # Preview what was loaded
             dnc_phones, dnc_area_codes, dnc_names = load_ld_dnc(df)
-            st.success(f"✓ Loaded DNC file from sheet '{sheet_name}'")
+            st.success(f"Loaded DNC file from sheet '{sheet_name}'")
             st.write(f"- {len(dnc_phones)} phone numbers")
             st.write(f"- {len(dnc_area_codes)} area codes: {', '.join(sorted(dnc_area_codes))}")
             st.write(f"- {len(dnc_names)} names")
@@ -4178,7 +4705,7 @@ def render_step3_dnc():
     # Show loaded status if already loaded (but not just uploaded)
     elif st.session_state.tcpa_ld_dnc_data is not None:
         dnc_phones, dnc_area_codes, dnc_names = load_ld_dnc(st.session_state.tcpa_ld_dnc_data)
-        st.success(f"✓ DNC file loaded")
+        st.success(f"DNC file loaded")
         st.write(f"- {len(dnc_phones)} phone numbers")
         st.write(f"- {len(dnc_area_codes)} area codes")
         st.write(f"- {len(dnc_names)} names")
@@ -4196,7 +4723,7 @@ def render_step3_dnc():
             before_count = len(df)
             
             # Progress display
-            st.subheader("🔍 DNC Filtering in progress...")
+            st.subheader("DNC Filtering in progress...")
             progress_bar = st.progress(0)
             status_text = st.empty()
             
@@ -4206,7 +4733,7 @@ def render_step3_dnc():
             dnc_phones, dnc_area_codes, dnc_names = load_ld_dnc(st.session_state.tcpa_ld_dnc_data)
             
             # 1. Filter by DNC phone numbers
-            status_text.write(f"⏳ Checking {before_count:,} rows against {len(dnc_phones):,} DNC phone numbers...")
+            status_text.write(f":material/pending: Checking {before_count:,} rows against {len(dnc_phones):,} DNC phone numbers...")
             progress_bar.progress(10)
             
             if mapping.phone and dnc_phones:
@@ -4217,11 +4744,11 @@ def render_step3_dnc():
                     all_removed.append(result.removed_df)
                     removal_summary['DNC phone match'] = result.removed_count
             
-            status_text.write(f"✅ DNC phone check complete: {removal_summary.get('DNC phone match', 0):,} matches removed")
+            status_text.write(f":material/check_circle: DNC phone check complete: {removal_summary.get('DNC phone match', 0):,} matches removed")
             progress_bar.progress(40)
             
             # 2. Filter by area code
-            status_text.write(f"⏳ Checking area codes against {len(dnc_area_codes)} blocked area codes...")
+            status_text.write(f":material/pending: Checking area codes against {len(dnc_area_codes)} blocked area codes...")
             
             if mapping.phone and dnc_area_codes:
                 result = filter_by_area_code(df, mapping.phone, dnc_area_codes)
@@ -4231,11 +4758,11 @@ def render_step3_dnc():
                     all_removed.append(result.removed_df)
                     removal_summary['DNC area code'] = result.removed_count
             
-            status_text.write(f"✅ Area code check complete: {removal_summary.get('DNC area code', 0):,} matches removed")
+            status_text.write(f":material/check_circle: Area code check complete: {removal_summary.get('DNC area code', 0):,} matches removed")
             progress_bar.progress(70)
             
             # 3. Filter by name match
-            status_text.write(f"⏳ Checking names against {len(dnc_names):,} DNC names...")
+            status_text.write(f":material/pending: Checking names against {len(dnc_names):,} DNC names...")
             
             if mapping.first_name and mapping.last_name and dnc_names:
                 result = filter_by_name_match(df, mapping.first_name, mapping.last_name, dnc_names)
@@ -4247,7 +4774,7 @@ def render_step3_dnc():
             
             progress_bar.progress(100)
             total_removed = before_count - len(df)
-            status_text.write(f"✅ Complete! Removed {total_removed:,} rows total ({len(df):,} remaining)")
+            status_text.write(f":material/check_circle: Complete! Removed {total_removed:,} rows total ({len(df):,} remaining)")
             
             # Combine removed rows
             removed_df = pd.concat(all_removed, ignore_index=True) if all_removed else pd.DataFrame()
@@ -4281,7 +4808,7 @@ def render_step3_dnc():
         st.dataframe(result.cleaned_df.head(25))
         
         st.divider()
-        if st.button("Next → Step 4: Zip Code Removal", type="primary"):
+        if st.button("Next: Step 4: Zip Code Removal", icon=":material/arrow_forward:", type="primary"):
             go_to_step("4. Zip Code Removal")
             st.rerun()
 
@@ -4309,14 +4836,14 @@ def render_step4_zipcode():
             df = load_file_with_progress(file_bytes, zips_file.name)
             st.session_state.tcpa_zips_data = df
             tcpa_zips = load_tcpa_zipcodes(df)
-            st.success(f"✓ Loaded {len(tcpa_zips)} zip codes")
+            st.success(f"Loaded {len(tcpa_zips)} zip codes")
         except Exception as e:
             st.error(f"Error loading file: {e}")
     
     # Show loaded status if already loaded (but not just uploaded)
     elif st.session_state.tcpa_zips_data is not None:
         tcpa_zips = load_tcpa_zipcodes(st.session_state.tcpa_zips_data)
-        st.success(f"✓ {len(tcpa_zips)} zip codes loaded")
+        st.success(f"{len(tcpa_zips)} zip codes loaded")
     
     # Show current data count
     if st.session_state.step2_result:
@@ -4331,7 +4858,7 @@ def render_step4_zipcode():
             before_count = len(df)
             
             # Progress display
-            st.subheader("🔍 Zip Code Filtering in progress...")
+            st.subheader("Zip Code Filtering in progress...")
             progress_bar = st.progress(0)
             status_text = st.empty()
             
@@ -4340,7 +4867,7 @@ def render_step4_zipcode():
             
             tcpa_zips = load_tcpa_zipcodes(st.session_state.tcpa_zips_data)
             
-            status_text.write(f"⏳ Checking {before_count:,} rows against {len(tcpa_zips):,} zip codes...")
+            status_text.write(f":material/pending: Checking {before_count:,} rows against {len(tcpa_zips):,} zip codes...")
             progress_bar.progress(25)
             
             if mapping.zip_code and tcpa_zips:
@@ -4353,7 +4880,7 @@ def render_step4_zipcode():
             
             progress_bar.progress(100)
             total_removed = before_count - len(df)
-            status_text.write(f"✅ Complete! Removed {total_removed:,} rows ({len(df):,} remaining)")
+            status_text.write(f":material/check_circle: Complete! Removed {total_removed:,} rows ({len(df):,} remaining)")
             
             removed_df = pd.concat(all_removed, ignore_index=True) if all_removed else pd.DataFrame()
             
@@ -4386,7 +4913,7 @@ def render_step4_zipcode():
         st.dataframe(result.cleaned_df.head(25))
         
         st.divider()
-        if st.button("Next → Step 5: Phone Number Removal", type="primary"):
+        if st.button("Next: Step 5: Phone Number Removal", icon=":material/arrow_forward:", type="primary"):
             go_to_step("5. Phone Number Removal")
             st.rerun()
 
@@ -4414,14 +4941,14 @@ def render_step5_phones():
             df = load_file_with_progress(file_bytes, phones_file.name)
             st.session_state.tcpa_phones_data = df
             tcpa_phones = load_tcpa_phones(df)
-            st.success(f"✓ Loaded {len(tcpa_phones)} phone numbers")
+            st.success(f"Loaded {len(tcpa_phones)} phone numbers")
         except Exception as e:
             st.error(f"Error loading file: {e}")
     
     # Show loaded status if already loaded (but not just uploaded)
     elif st.session_state.tcpa_phones_data is not None:
         tcpa_phones = load_tcpa_phones(st.session_state.tcpa_phones_data)
-        st.success(f"✓ {len(tcpa_phones)} phone numbers loaded")
+        st.success(f"{len(tcpa_phones)} phone numbers loaded")
     
     # Show current data count
     if st.session_state.step3_result:
@@ -4436,7 +4963,7 @@ def render_step5_phones():
             before_count = len(df)
             
             # Progress display
-            st.subheader("🔍 Filtering in progress...")
+            st.subheader("Filtering in progress...")
             progress_bar = st.progress(0)
             status_text = st.empty()
             
@@ -4446,7 +4973,7 @@ def render_step5_phones():
             tcpa_phones = load_tcpa_phones(st.session_state.tcpa_phones_data)
             
             # 1. Filter by TCPA phones
-            status_text.write(f"⏳ Checking {before_count:,} rows against {len(tcpa_phones):,} TCPA phone numbers...")
+            status_text.write(f":material/pending: Checking {before_count:,} rows against {len(tcpa_phones):,} TCPA phone numbers...")
             progress_bar.progress(25)
             
             if mapping.phone and tcpa_phones:
@@ -4457,11 +4984,11 @@ def render_step5_phones():
                     all_removed.append(result.removed_df)
                     removal_summary['TCPA phone match'] = result.removed_count
             
-            status_text.write(f"✅ TCPA check complete: {removal_summary.get('TCPA phone match', 0):,} matches removed")
+            status_text.write(f":material/check_circle: TCPA check complete: {removal_summary.get('TCPA phone match', 0):,} matches removed")
             progress_bar.progress(50)
             
             # 2. Remove duplicate phones (always last)
-            status_text.write(f"⏳ Removing duplicate phone numbers from {len(df):,} rows...")
+            status_text.write(f":material/pending: Removing duplicate phone numbers from {len(df):,} rows...")
             progress_bar.progress(75)
             
             if mapping.phone:
@@ -4474,7 +5001,7 @@ def render_step5_phones():
             
             progress_bar.progress(100)
             total_removed = before_count - len(df)
-            status_text.write(f"✅ Complete! Removed {total_removed:,} rows total ({len(df):,} remaining)")
+            status_text.write(f":material/check_circle: Complete! Removed {total_removed:,} rows total ({len(df):,} remaining)")
             
             removed_df = pd.concat(all_removed, ignore_index=True) if all_removed else pd.DataFrame()
             
@@ -4537,11 +5064,11 @@ def render_step5_phones():
         
         render_download_section(result.cleaned_df, combined_removed_df, "final", st.session_state.column_mapping)
         
-        st.success("🎉 Data cleansing complete! Download your final results above.")
+        st.success("Data cleansing complete! Download your final results above.")
         
         # Next button to Step 6
         st.divider()
-        if st.button("Next → Step 6: Master Phone Suppression", type="primary"):
+        if st.button("Next: Step 6: Master Phone Suppression", icon=":material/arrow_forward:", type="primary"):
             go_to_step("6. Master Phone Suppression")
             st.rerun()
 
@@ -4557,7 +5084,7 @@ def render_step6_master_suppression():
     # Check prerequisite: Step 5 (Phone Number Removal) must be done
     if st.session_state.step4_result is None:
         st.warning("Please complete Step 5 (Phone Number Removal) first.")
-        if st.button("← Back to Step 5"):
+        if st.button("Back to Step 5", icon=":material/arrow_back:"):
             go_to_step("5. Phone Number Removal")
             st.rerun()
         return
@@ -4568,7 +5095,7 @@ def render_step6_master_suppression():
     # Check if already done
     if st.session_state.master_phone_result is not None:
         result = st.session_state.master_phone_result
-        st.success("✅ Master phone suppression complete!")
+        st.success("Master phone suppression complete!")
         st.divider()
         col1, col2, col3 = st.columns(3)
         col1.metric("Before", f"{result.before_count:,}")
@@ -4581,11 +5108,11 @@ def render_step6_master_suppression():
         st.divider()
         col1, col2 = st.columns([1, 1])
         with col1:
-            if st.button("← Back to Step 5", use_container_width=True):
+            if st.button("Back to Step 5", icon=":material/arrow_back:", use_container_width=True):
                 go_to_step("5. Phone Number Removal")
                 st.rerun()
         with col2:
-            if st.button("Next → Step 7: Cross-File Dedupe", type="primary", use_container_width=True):
+            if st.button("Next: Step 7: Cross-File Dedupe", icon=":material/arrow_forward:", type="primary", use_container_width=True):
                 go_to_step("7. Cross-File Dedupe")
                 st.rerun()
         return
@@ -4604,13 +5131,13 @@ def render_step6_master_suppression():
     )
     
     if master_file:
-        st.caption(f"✓ File: {master_file.name}")
+        st.caption(f":material/check_circle: File: {master_file.name}")
     
     st.divider()
     
     if master_file is None:
         st.warning("Please upload a master phone list file to proceed.")
-        if st.button("← Back to Step 5"):
+        if st.button("Back to Step 5", icon=":material/arrow_back:"):
             go_to_step("5. Phone Number Removal")
             st.rerun()
         return
@@ -4619,7 +5146,7 @@ def render_step6_master_suppression():
         with st.spinner("Extracting phone numbers from all tabs..."):
             master_file.seek(0)
             master_phones = load_phones_from_all_tabs(BytesIO(master_file.read()))
-            st.write(f"📞 Extracted **{len(master_phones):,}** unique phone numbers from master list.")
+            st.write(f"Extracted **{len(master_phones):,}** unique phone numbers from master list.")
         
         with st.spinner("Filtering data against master phone list..."):
             # Get the current cleaned data from Step 5
@@ -4657,7 +5184,7 @@ def render_step6_master_suppression():
             st.rerun()
     
     st.divider()
-    if st.button("← Back to Step 5", use_container_width=True):
+    if st.button("Back to Step 5", icon=":material/arrow_back:", use_container_width=True):
         go_to_step("5. Phone Number Removal")
         st.rerun()
 
@@ -4669,7 +5196,7 @@ def render_step7_crossfile_dedupe():
     # Check prerequisite: need either step6 (master phone) result or step4 (phone) result
     if st.session_state.master_phone_result is None and st.session_state.step4_result is None:
         st.warning("Please complete Step 6 (Master Phone Suppression) first.")
-        if st.button("← Back to Step 6"):
+        if st.button("Back to Step 6", icon=":material/arrow_back:"):
             go_to_step("6. Master Phone Suppression")
             st.rerun()
         return
@@ -4680,14 +5207,14 @@ def render_step7_crossfile_dedupe():
     st.divider()
     
     # --- File 1: Cleaned data from Steps 1-5 (Requirements 5.1, 5.3) ---
-    st.subheader("📁 File 1 (Newest) - From Steps 1-5")
+    st.subheader("File 1 (Newest) - From Steps 1-5")
     file1_df = st.session_state.step4_result.cleaned_df
-    st.success(f"✓ File 1 loaded: **{len(file1_df):,}** rows")
+    st.success(f"File 1 loaded: **{len(file1_df):,}** rows")
     
     st.divider()
     
     # --- File uploaders for Files 2-5 (Requirements 5.2) ---
-    st.subheader("📤 Upload Pre-Cleaned Weekly Files (Files 2-5)")
+    st.subheader("Upload Pre-Cleaned Weekly Files (Files 2-5)")
     st.write("Upload 4 additional pre-cleaned files, from newest to oldest.")
     
     col1, col2 = st.columns(2)
@@ -4696,7 +5223,7 @@ def render_step7_crossfile_dedupe():
         # File 2 uploader
         st.write("**File 2 (2nd Newest)**")
         if st.session_state.file2_data is not None and st.session_state.file2_name:
-            st.success(f"✓ {st.session_state.file2_name}")
+            st.success(f"{st.session_state.file2_name}")
             st.caption(f"{len(st.session_state.file2_data):,} rows")
         else:
             file2_upload = st.file_uploader(
@@ -4718,7 +5245,7 @@ def render_step7_crossfile_dedupe():
         # File 3 uploader
         st.write("**File 3 (Middle)**")
         if st.session_state.file3_data is not None and st.session_state.file3_name:
-            st.success(f"✓ {st.session_state.file3_name}")
+            st.success(f"{st.session_state.file3_name}")
             st.caption(f"{len(st.session_state.file3_data):,} rows")
         else:
             file3_upload = st.file_uploader(
@@ -4741,7 +5268,7 @@ def render_step7_crossfile_dedupe():
         # File 4 uploader
         st.write("**File 4 (2nd Oldest)**")
         if st.session_state.file4_data is not None and st.session_state.file4_name:
-            st.success(f"✓ {st.session_state.file4_name}")
+            st.success(f"{st.session_state.file4_name}")
             st.caption(f"{len(st.session_state.file4_data):,} rows")
         else:
             file4_upload = st.file_uploader(
@@ -4763,7 +5290,7 @@ def render_step7_crossfile_dedupe():
         # File 5 uploader
         st.write("**File 5 (Oldest)**")
         if st.session_state.file5_data is not None and st.session_state.file5_name:
-            st.success(f"✓ {st.session_state.file5_name}")
+            st.success(f"{st.session_state.file5_name}")
             st.caption(f"{len(st.session_state.file5_data):,} rows")
         else:
             file5_upload = st.file_uploader(
@@ -4785,7 +5312,7 @@ def render_step7_crossfile_dedupe():
     st.divider()
     
     # --- Display row counts for all 5 files (Requirements 5.3) ---
-    st.subheader("📊 File Summary")
+    st.subheader("File Summary")
     
     # Build summary table data showing full filenames
     summary_data = []
@@ -4803,14 +5330,14 @@ def render_step7_crossfile_dedupe():
         if df is not None:
             summary_data.append({
                 "File": label,
-                "Status": "✓ Loaded",
+                "Status": "Loaded",
                 "Filename": fname or "—",
                 "Rows": f"{len(df):,}"
             })
         else:
             summary_data.append({
                 "File": label,
-                "Status": "⏳ Pending",
+                "Status": ":material/pending: Pending",
                 "Filename": "—",
                 "Rows": "—"
             })
@@ -4823,15 +5350,15 @@ def render_step7_crossfile_dedupe():
     
     # Show status message
     if all_files_loaded:
-        st.success("✓ All 5 files loaded! Ready for deduplication.")
+        st.success("All 5 files loaded! Ready for deduplication.")
     else:
         loaded_count = sum(1 for _, df, _ in files_info if df is not None)
-        st.info(f"📁 {loaded_count}/5 files loaded. Upload remaining files to proceed.")
+        st.info(f"{loaded_count}/5 files loaded. Upload remaining files to proceed.")
     
     # --- Deduplication Section (Requirements 5.4-5.9) ---
     if all_files_loaded:
         st.divider()
-        st.subheader("🔄 Deduplication")
+        st.subheader("Deduplication")
         st.write("Remove duplicate phone numbers from older files. Process from oldest to newest.")
         
         mapping = st.session_state.column_mapping
@@ -4849,13 +5376,13 @@ def render_step7_crossfile_dedupe():
                 col1.metric("Before", f"{counts['before']:,}")
                 col2.metric("Removed", f"{counts['removed']:,}")
                 col3.metric("After", f"{counts['after']:,}")
-            st.success(f"✓ File 5 deduped: {len(st.session_state.file5_deduped):,} rows remaining")
+            st.success(f"File 5 deduped: {len(st.session_state.file5_deduped):,} rows remaining")
         else:
             if st.button("Dedupe File 5", key="dedupe_file5", type="primary"):
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 
-                status_text.write("⏳ Building reference phone list from Files 1-4...")
+                status_text.write(":material/pending: Building reference phone list from Files 1-4...")
                 progress_bar.progress(20)
                 
                 before_count = len(st.session_state.file5_data)
@@ -4866,13 +5393,13 @@ def render_step7_crossfile_dedupe():
                     st.session_state.file4_data
                 ]
                 
-                status_text.write(f"⏳ Checking {before_count:,} rows against reference files...")
+                status_text.write(f":material/pending: Checking {before_count:,} rows against reference files...")
                 progress_bar.progress(50)
                 
                 result = dedupe_against_files(st.session_state.file5_data, reference_dfs, phone_col)
                 
                 progress_bar.progress(100)
-                status_text.write(f"✅ Complete! Removed {result.removed_count:,} duplicates ({len(result.cleaned_df):,} remaining)")
+                status_text.write(f":material/check_circle: Complete! Removed {result.removed_count:,} duplicates ({len(result.cleaned_df):,} remaining)")
                 
                 st.session_state.file5_deduped = result.cleaned_df
                 st.session_state.file5_dedupe_counts = {
@@ -4895,13 +5422,13 @@ def render_step7_crossfile_dedupe():
                 col1.metric("Before", f"{counts['before']:,}")
                 col2.metric("Removed", f"{counts['removed']:,}")
                 col3.metric("After", f"{counts['after']:,}")
-            st.success(f"✓ File 4 deduped: {len(st.session_state.file4_deduped):,} rows remaining")
+            st.success(f"File 4 deduped: {len(st.session_state.file4_deduped):,} rows remaining")
         else:
             if st.button("Dedupe File 4", key="dedupe_file4", type="primary"):
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 
-                status_text.write("⏳ Building reference phone list from Files 1-3...")
+                status_text.write(":material/pending: Building reference phone list from Files 1-3...")
                 progress_bar.progress(20)
                 
                 before_count = len(st.session_state.file4_data)
@@ -4911,13 +5438,13 @@ def render_step7_crossfile_dedupe():
                     st.session_state.file3_data
                 ]
                 
-                status_text.write(f"⏳ Checking {before_count:,} rows against reference files...")
+                status_text.write(f":material/pending: Checking {before_count:,} rows against reference files...")
                 progress_bar.progress(50)
                 
                 result = dedupe_against_files(st.session_state.file4_data, reference_dfs, phone_col)
                 
                 progress_bar.progress(100)
-                status_text.write(f"✅ Complete! Removed {result.removed_count:,} duplicates ({len(result.cleaned_df):,} remaining)")
+                status_text.write(f":material/check_circle: Complete! Removed {result.removed_count:,} duplicates ({len(result.cleaned_df):,} remaining)")
                 
                 st.session_state.file4_deduped = result.cleaned_df
                 st.session_state.file4_dedupe_counts = {
@@ -4940,13 +5467,13 @@ def render_step7_crossfile_dedupe():
                 col1.metric("Before", f"{counts['before']:,}")
                 col2.metric("Removed", f"{counts['removed']:,}")
                 col3.metric("After", f"{counts['after']:,}")
-            st.success(f"✓ File 3 deduped: {len(st.session_state.file3_deduped):,} rows remaining")
+            st.success(f"File 3 deduped: {len(st.session_state.file3_deduped):,} rows remaining")
         else:
             if st.button("Dedupe File 3", key="dedupe_file3", type="primary"):
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 
-                status_text.write("⏳ Building reference phone list from Files 1-2...")
+                status_text.write(":material/pending: Building reference phone list from Files 1-2...")
                 progress_bar.progress(20)
                 
                 before_count = len(st.session_state.file3_data)
@@ -4955,13 +5482,13 @@ def render_step7_crossfile_dedupe():
                     st.session_state.file2_data
                 ]
                 
-                status_text.write(f"⏳ Checking {before_count:,} rows against reference files...")
+                status_text.write(f":material/pending: Checking {before_count:,} rows against reference files...")
                 progress_bar.progress(50)
                 
                 result = dedupe_against_files(st.session_state.file3_data, reference_dfs, phone_col)
                 
                 progress_bar.progress(100)
-                status_text.write(f"✅ Complete! Removed {result.removed_count:,} duplicates ({len(result.cleaned_df):,} remaining)")
+                status_text.write(f":material/check_circle: Complete! Removed {result.removed_count:,} duplicates ({len(result.cleaned_df):,} remaining)")
                 
                 st.session_state.file3_deduped = result.cleaned_df
                 st.session_state.file3_dedupe_counts = {
@@ -4984,25 +5511,25 @@ def render_step7_crossfile_dedupe():
                 col1.metric("Before", f"{counts['before']:,}")
                 col2.metric("Removed", f"{counts['removed']:,}")
                 col3.metric("After", f"{counts['after']:,}")
-            st.success(f"✓ File 2 deduped: {len(st.session_state.file2_deduped):,} rows remaining")
+            st.success(f"File 2 deduped: {len(st.session_state.file2_deduped):,} rows remaining")
         else:
             if st.button("Dedupe File 2", key="dedupe_file2", type="primary"):
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 
-                status_text.write("⏳ Building reference phone list from File 1...")
+                status_text.write(":material/pending: Building reference phone list from File 1...")
                 progress_bar.progress(20)
                 
                 before_count = len(st.session_state.file2_data)
                 reference_dfs = [file1_df]
                 
-                status_text.write(f"⏳ Checking {before_count:,} rows against File 1...")
+                status_text.write(f":material/pending: Checking {before_count:,} rows against File 1...")
                 progress_bar.progress(50)
                 
                 result = dedupe_against_files(st.session_state.file2_data, reference_dfs, phone_col)
                 
                 progress_bar.progress(100)
-                status_text.write(f"✅ Complete! Removed {result.removed_count:,} duplicates ({len(result.cleaned_df):,} remaining)")
+                status_text.write(f":material/check_circle: Complete! Removed {result.removed_count:,} duplicates ({len(result.cleaned_df):,} remaining)")
                 
                 st.session_state.file2_deduped = result.cleaned_df
                 st.session_state.file2_dedupe_counts = {
@@ -5029,8 +5556,8 @@ def render_step7_crossfile_dedupe():
         
         if all_deduped:
             st.divider()
-            st.subheader("📥 Download Deduplicated Files")
-            st.success("🎉 All files deduplicated! Download your results below.")
+            st.subheader("Download Deduplicated Files")
+            st.success("All files deduplicated! Download your results below.")
             
             # Create download buttons for all 5 files
             col1, col2, col3, col4, col5 = st.columns(5)
@@ -5043,7 +5570,7 @@ def render_step7_crossfile_dedupe():
                 if cache_key_file1 not in st.session_state:
                     st.session_state[cache_key_file1] = export_to_excel(file1_df)
                 st.download_button(
-                    label="📥 Download",
+                    label="Download",
                     data=st.session_state[cache_key_file1],
                     file_name="file1_deduped.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -5057,7 +5584,7 @@ def render_step7_crossfile_dedupe():
                 if cache_key_file2 not in st.session_state:
                     st.session_state[cache_key_file2] = export_to_excel(st.session_state.file2_deduped)
                 st.download_button(
-                    label="📥 Download",
+                    label="Download",
                     data=st.session_state[cache_key_file2],
                     file_name="file2_deduped.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -5071,7 +5598,7 @@ def render_step7_crossfile_dedupe():
                 if cache_key_file3 not in st.session_state:
                     st.session_state[cache_key_file3] = export_to_excel(st.session_state.file3_deduped)
                 st.download_button(
-                    label="📥 Download",
+                    label="Download",
                     data=st.session_state[cache_key_file3],
                     file_name="file3_deduped.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -5085,7 +5612,7 @@ def render_step7_crossfile_dedupe():
                 if cache_key_file4 not in st.session_state:
                     st.session_state[cache_key_file4] = export_to_excel(st.session_state.file4_deduped)
                 st.download_button(
-                    label="📥 Download",
+                    label="Download",
                     data=st.session_state[cache_key_file4],
                     file_name="file4_deduped.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -5099,7 +5626,7 @@ def render_step7_crossfile_dedupe():
                 if cache_key_file5 not in st.session_state:
                     st.session_state[cache_key_file5] = export_to_excel(st.session_state.file5_deduped)
                 st.download_button(
-                    label="📥 Download",
+                    label="Download",
                     data=st.session_state[cache_key_file5],
                     file_name="file5_deduped.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -5107,7 +5634,7 @@ def render_step7_crossfile_dedupe():
                 )
             
             st.divider()
-            if st.button("Next → Step 8: Bad States", type="primary"):
+            if st.button("Next: Step 8: Bad States", icon=":material/arrow_forward:", type="primary"):
                 go_to_step("8. Bad States")
                 st.rerun()
 
@@ -5133,7 +5660,7 @@ def render_download_section(cleaned_df: pd.DataFrame, removed_df: pd.DataFrame, 
                 st.session_state[cache_key_cleaned] = export_to_excel(cleaned_df)
         
         st.download_button(
-            label="📥 Download Excel",
+            label="Download Excel",
             data=st.session_state[cache_key_cleaned],
             file_name=f"cleaned_{step_name}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -5149,7 +5676,7 @@ def render_download_section(cleaned_df: pd.DataFrame, removed_df: pd.DataFrame, 
                     st.session_state[cache_key_removed] = export_removed_rows_to_excel(removed_df, column_mapping)
             
             st.download_button(
-                label="📥 Download Excel",
+                label="Download Excel",
                 data=st.session_state[cache_key_removed],
                 file_name=f"removed_{step_name}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

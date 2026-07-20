@@ -4,17 +4,36 @@ A Streamlit web application for cleaning and validating refinance lead data thro
 
 ## Overview
 
-This tool processes raw refinance lead data files through a cleaning pipeline, removing invalid entries, matching against Do Not Call (DNC) lists, suppressing phone numbers, deduplicating across files, and filtering by state. The application supports two workflows:
+This tool processes raw refinance lead data files through a cleaning pipeline, removing invalid entries, matching against Do Not Call (DNC) lists, suppressing phone numbers, deduplicating across files, and filtering by state. The application supports four workflows:
 
-- **Single-File Workflow (Clean 1 File)** — A 9-step pipeline for processing one data file at a time
-- **Multi-File Workflow (Clean 5 Files)** — A 10-step pipeline for processing 5 weekly files together with cross-file deduplication and master phone suppression
+- **⚡ Fast Clean — 1 File** — One-click pipeline for a single file (recommended)
+- **⚡ Fast Clean — 5 Files** — One-click pipeline for up to 5 weekly files
+- **📄 Clean 1 File** — The classic 9-step guided single-file pipeline
+- **📁 Clean 5 Files** — The classic 10-step guided multi-file pipeline
 
 ## Home Page
 
-On launch, the app displays a home page with the company logo and two workflow options:
-- **📄 Clean 1 File** — Single-file workflow
-- **📁 Clean 5 Files** — Multi-file workflow
-- **🗑️ Clear and Start Over** — Resets all workflow state (shown when existing data is present)
+On launch, the app displays a home page with the company logo and four workflow options, grouped into **Fast** (one-click) and **Step-by-step** (classic) cards. A **🗑️ Clear and Start Over** button appears when existing workflow data is present.
+
+---
+
+## Fast (One-Click) Workflows
+
+The fast workflows collapse the entire multi-step pipeline into three screens: **upload data → upload suppression/billing files → run**. All processing happens in one click; results appear on a single screen with per-stage stats, removed-row review, and downloads.
+
+### Fast Clean — 1 File
+1. **Upload data** — Upload one Excel/CSV file. Required columns are validated and extras dropped.
+2. **Upload lists** — Optionally upload TCPA DNC, zip codes, TCPA phones, master phone list, up to 2 billing files, and a bad-states file. Toggle "Always remove AZ, DE, and TX." A live summary shows which stages will run.
+3. **Run & results** — The pipeline runs Clean Bad Data → TCPA DNC → Zip Codes → TCPA Phones → Master Phone Suppression → Bad States → Billing. **Any stage whose file was not provided is skipped** and noted in the results. Download the cleaned Excel and a combined removed-rows Excel (with Step/Reason columns).
+
+### Fast Clean — 5 Files
+Same three screens, but upload up to 5 data files (newest first). Cross-file deduplication runs automatically when 2 or more files are provided (File 1 is the reference and keeps all rows; older files have phones present in newer files removed). Billing applies to File 1 only. Results include a per-file summary table and a single **Download All as ZIP** (final files at root, removed rows under `removed_rows/`).
+
+The fast workflows reuse the exact same cleaning/matching logic as the classic workflows via `pipeline.py`, so output matches the step-by-step flows.
+
+---
+
+## Classic (Step-by-Step) Workflows
 
 ---
 
@@ -154,7 +173,10 @@ Each data file must contain these columns:
 ## Project Structure
 
 ```
-├── app.py              # Streamlit UI and workflow orchestration (single + multi-file)
+├── app.py              # Streamlit UI and workflow orchestration (fast + classic, single + multi-file)
+├── pipeline.py         # Pure stage runners + one-click orchestrators used by the fast workflows
+├── ui_theme.py         # App-wide CSS, stepper, and home-page cards (presentation only)
+├── .streamlit/         # Streamlit theme config (config.toml)
 ├── cleaning.py         # Data cleaning functions (validation, filtering, deduplication)
 ├── file_io.py          # File reading/writing, Excel highlight detection, ZIP export
 ├── matching.py         # TCPA/DNC matching functions (phones, area codes, names, zips)

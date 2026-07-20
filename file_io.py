@@ -210,6 +210,8 @@ REASON_DESCRIPTIONS = {
     'empty_phone': 'Empty/missing phone number',
     'invalid_phone': 'Invalid phone (must be 10 digits, not starting with 1)',
     'invalid_email': 'Invalid email format',
+    'fake_email': 'Fake/suspicious email',
+    'dnc_phone_match': 'Phone matches DNC list',
     'dnc_area_code': 'Phone area code matches DNC list',
     'dnc_name_match': 'Name matches DNC list',
     'tcpa_phone_match': 'Phone matches TCPA suppression list',
