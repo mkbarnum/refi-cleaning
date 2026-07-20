@@ -365,8 +365,7 @@ def render_home_page():
     with col2:
         ui_theme.render_hero(
             "Refinance Data Cleansing",
-            "Clean lead files against DNC, TCPA, and suppression lists — then download "
-            "results and a full record of what was removed.",
+            "Clean lead files against DNC, TCPA, and suppression lists.",
             _logo_data_uri(),
         )
 
@@ -382,66 +381,66 @@ def render_home_page():
                 st.rerun()
 
         st.markdown("#### Fast — one click")
-        st.caption("Upload everything up front, run the whole pipeline in a single click.")
 
-        fast_col1, fast_col2 = st.columns(2)
+        fast_col1, fast_col2 = st.columns(2, gap="medium")
         with fast_col1:
-            ui_theme.home_card(
-                "Fast", "fast", ui_theme.IC["fast"], ui_theme.IC["one_file"], "Fast Clean — 1 File",
-                "Upload one data file, then your suppression and billing files, and run "
-                "the entire pipeline at once.",
-            )
-            if st.button("Start — 1 file", type="primary", icon=":material/bolt:",
-                         use_container_width=True, key="home_fast_single"):
-                clear_single_file_state()
-                clear_multi_file_state()
-                clear_fast_state()
-                st.session_state.workflow_mode = "fast_single"
-                st.rerun()
+            with st.container(border=True):
+                ui_theme.option_card_body(
+                    ui_theme.IC["one_file"], "1 file",
+                    "Clean a single file end to end.",
+                )
+                if st.button("Start", type="primary", icon=":material/bolt:",
+                             use_container_width=True, key="home_fast_single"):
+                    clear_single_file_state()
+                    clear_multi_file_state()
+                    clear_fast_state()
+                    st.session_state.workflow_mode = "fast_single"
+                    st.rerun()
         with fast_col2:
-            ui_theme.home_card(
-                "Fast", "fast", ui_theme.IC["fast"], ui_theme.IC["many_files"], "Fast Clean — 5 Files",
-                "Upload up to 5 weekly files (newest first) plus shared lists, and run "
-                "everything — including cross-file dedupe — at once.",
-            )
-            if st.button("Start — 5 files", type="primary", icon=":material/bolt:",
-                         use_container_width=True, key="home_fast_multi"):
-                clear_single_file_state()
-                clear_multi_file_state()
-                clear_fast_state()
-                st.session_state.workflow_mode = "fast_multi"
-                st.rerun()
+            with st.container(border=True):
+                ui_theme.option_card_body(
+                    ui_theme.IC["many_files"], "5 files",
+                    "Clean a weekly batch with cross-file dedupe.",
+                )
+                if st.button("Start", type="primary", icon=":material/bolt:",
+                             use_container_width=True, key="home_fast_multi"):
+                    clear_single_file_state()
+                    clear_multi_file_state()
+                    clear_fast_state()
+                    st.session_state.workflow_mode = "fast_multi"
+                    st.rerun()
 
         st.write("")
         st.markdown("#### Step-by-step")
-        st.caption("The original guided workflows — review removal stats after each step.")
 
-        classic_col1, classic_col2 = st.columns(2)
+        classic_col1, classic_col2 = st.columns(2, gap="medium")
         with classic_col1:
-            ui_theme.home_card(
-                "Guided", "classic", ui_theme.IC["details"], ui_theme.IC["one_file"], "Clean 1 File",
-                "The original guided single-file workflow, one step at a time.",
-            )
-            if st.button("Open — 1 file", icon=":material/description:",
-                         use_container_width=True, key="home_classic_single"):
-                clear_multi_file_state()
-                clear_fast_state()
-                st.session_state.workflow_mode = "single"
-                st.session_state.current_step = "1. Upload Raw Data"
-                st.rerun()
+            with st.container(border=True):
+                ui_theme.option_card_body(
+                    ui_theme.IC["one_file"], "1 file",
+                    "Guided, one step at a time.",
+                )
+                if st.button("Open", icon=":material/description:",
+                             use_container_width=True, key="home_classic_single"):
+                    clear_multi_file_state()
+                    clear_fast_state()
+                    st.session_state.workflow_mode = "single"
+                    st.session_state.current_step = "1. Upload Raw Data"
+                    st.rerun()
         with classic_col2:
-            ui_theme.home_card(
-                "Guided", "classic", ui_theme.IC["details"], ui_theme.IC["many_files"], "Clean 5 Files",
-                "The original guided multi-file workflow with intermediate download checkpoints.",
-            )
-            if st.button("Open — 5 files", icon=":material/folder_open:",
-                         use_container_width=True, key="home_classic_multi"):
-                clear_single_file_state()
-                clear_fast_state()
-                st.session_state.workflow_mode = "multi"
-                st.session_state.current_step = "1. Upload 5 Files"
-                init_multi_file_workflow_state()
-                st.rerun()
+            with st.container(border=True):
+                ui_theme.option_card_body(
+                    ui_theme.IC["many_files"], "5 files",
+                    "Guided, with download checkpoints.",
+                )
+                if st.button("Open", icon=":material/folder_open:",
+                             use_container_width=True, key="home_classic_multi"):
+                    clear_single_file_state()
+                    clear_fast_state()
+                    st.session_state.workflow_mode = "multi"
+                    st.session_state.current_step = "1. Upload 5 Files"
+                    init_multi_file_workflow_state()
+                    st.rerun()
 
 
 # =========================================================================== #

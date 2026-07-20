@@ -149,28 +149,35 @@ section[data-testid="stSidebar"] { background: var(--rc-surface); border-right: 
 .rc-hero-title { margin: 0; font-size: 1.75rem; font-weight: 700; color: var(--rc-ink); letter-spacing: -0.015em; }
 .rc-hero-sub { color: var(--rc-body); font-size: 1.02rem; margin: 2px 0 0 0; }
 
-/* ---- Home cards ---- */
-.rc-card {
-  background: var(--rc-surface);
-  border: 1px solid var(--rc-border);
+/* ---- Home option cards (native bordered container + button inside) ---- */
+/* Paired cards in a row stretch to equal height; the button pins to the bottom
+   so the two buttons always line up regardless of description length. */
+[data-testid="stHorizontalBlock"]:has(.rc-opt) { align-items: stretch; }
+[data-testid="stVerticalBlockBorderWrapper"]:has(.rc-opt) {
   border-radius: 16px;
-  padding: 20px 20px 6px 20px;
+  border-color: var(--rc-border);
   box-shadow: var(--rc-shadow);
+  height: 100%;
   transition: border-color .18s var(--rc-ease), box-shadow .18s var(--rc-ease);
 }
-.rc-card:hover { border-color: var(--rc-border-strong); box-shadow: 0 4px 16px rgba(15,23,42,.08); }
-.rc-card-title { display: flex; align-items: center; gap: 9px; margin: 0 0 6px 0; }
-.rc-card-title .rc-ic { color: var(--rc-primary); font-size: 1.25rem; line-height: 1; }
-.rc-card h4 { margin: 0; font-size: 1.12rem; color: var(--rc-ink); }
-.rc-card p { color: var(--rc-body); font-size: .9rem; line-height: 1.5; margin: 0 0 14px 0; min-height: 44px; }
-.rc-badge {
-  display: inline-flex; align-items: center; gap: 5px;
-  font-size: .68rem; font-weight: 700; padding: 3px 9px; border-radius: 999px;
-  margin-bottom: 12px; text-transform: uppercase; letter-spacing: .05em;
+[data-testid="stVerticalBlockBorderWrapper"]:has(.rc-opt):hover {
+  border-color: var(--rc-border-strong);
+  box-shadow: 0 6px 20px rgba(15,23,42,.08);
 }
-.rc-badge .rc-ic { font-size: .95rem; line-height: 1; }
-.rc-badge-fast { background: var(--rc-primary-soft); color: var(--rc-primary-dark); }
-.rc-badge-classic { background: var(--rc-bg-soft); color: var(--rc-muted); }
+[data-testid="stVerticalBlockBorderWrapper"]:has(.rc-opt) > div { height: 100%; }
+[data-testid="stVerticalBlockBorderWrapper"]:has(.rc-opt) [data-testid="stVerticalBlock"] {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+[data-testid="stVerticalBlockBorderWrapper"]:has(.rc-opt) [data-testid="stElementContainer"]:last-child {
+  margin-top: auto;
+}
+.rc-opt-title { display: flex; align-items: center; gap: 9px; margin: 2px 0 6px 0; }
+.rc-opt-title .rc-ic { color: var(--rc-primary); font-size: 1.4rem; }
+.rc-opt-title span { font-size: 1.12rem; font-weight: 700; color: var(--rc-ink); letter-spacing: -0.01em; }
+.rc-opt-desc { color: var(--rc-body); font-size: .92rem; line-height: 1.45; margin: 0; }
 
 /* ---- Stepper ---- */
 .rc-stepper { display: flex; align-items: center; gap: 0; margin: 8px 0 26px 0; }
@@ -289,16 +296,18 @@ def render_stepper(steps: List[str], active_index: int) -> None:
     st.markdown("".join(html), unsafe_allow_html=True)
 
 
-def home_card(badge_label: str, badge_kind: str, badge_icon: str,
-              title_icon: str, title: str, description: str) -> None:
-    """Render the visual card body for a home-page option (button rendered separately)."""
+def option_card_body(title_icon: str, title: str, description: str) -> None:
+    """Render the title + one-line description inside a home-page option card.
+
+    Call inside a `with st.container(border=True):` block, followed by the card's
+    button. A sentinel `.rc-opt` marker lets the CSS pin the button to the bottom
+    so paired cards keep their buttons aligned regardless of copy length.
+    """
     st.markdown(
         f"""
-        <div class="rc-card">
-          <span class="rc-badge rc-badge-{badge_kind}">{_ic(badge_icon)}{badge_label}</span>
-          <div class="rc-card-title">{_ic(title_icon)}<h4>{title}</h4></div>
-          <p>{description}</p>
-        </div>
+        <div class="rc-opt"></div>
+        <div class="rc-opt-title">{_ic(title_icon)}<span>{title}</span></div>
+        <p class="rc-opt-desc">{description}</p>
         """,
         unsafe_allow_html=True,
     )
