@@ -101,6 +101,9 @@ h3 { font-size: 1.15rem; }
   outline-offset: 1px;
   border-color: var(--rc-primary);
 }
+/* Button labels render inside a <p>; make them follow the button color
+   instead of the global body-text color (fixes dark text on the blue button). */
+.stButton > button p, .stDownloadButton > button p { color: inherit !important; }
 .stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {
   background: var(--rc-primary);
   border-color: var(--rc-primary);

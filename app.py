@@ -420,7 +420,7 @@ def render_home_page():
                     ui_theme.IC["one_file"], "1 file",
                     "Guided, one step at a time.",
                 )
-                if st.button("Open", icon=":material/description:",
+                if st.button("Start", icon=":material/slow_motion_video:",
                              use_container_width=True, key="home_classic_single"):
                     clear_multi_file_state()
                     clear_fast_state()
@@ -433,7 +433,7 @@ def render_home_page():
                     ui_theme.IC["many_files"], "5 files",
                     "Guided, with download checkpoints.",
                 )
-                if st.button("Open", icon=":material/folder_open:",
+                if st.button("Start", icon=":material/slow_motion_video:",
                              use_container_width=True, key="home_classic_multi"):
                     clear_single_file_state()
                     clear_fast_state()
